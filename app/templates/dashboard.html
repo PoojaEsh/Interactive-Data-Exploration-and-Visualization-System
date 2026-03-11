@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Your Datasets</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="dashboard-body">
+
+    <div class="navbar">
+        <h2>📊 Analytics Dashboard</h2>
+        <a href="/logout" class="logout-btn">Logout</a>
+    </div>
+
+    <div class="container">
+
+        <div class="upload-card">
+            <h3>Upload Dataset</h3>
+            <form method="POST" enctype="multipart/form-data">
+                <input type="file" name="file">
+                <button type="submit">Upload</button>
+            </form>
+        </div>
+
+        <div class="dataset-card">
+            <h3>Your Datasets</h3>
+
+            <div class="file-item">
+                <span>📁 Sample data_Physical parameters.xlsx</span>
+                <button class="delete-btn">Delete</button>
+            </div>
+
+            <div class="file-item">
+                <span>📁 ITC.NS.xlsx</span>
+                <button class="delete-btn">Delete</button>
+            </div>
+
+        </div>
+
+    </div>
+
+</body>
+</html>
