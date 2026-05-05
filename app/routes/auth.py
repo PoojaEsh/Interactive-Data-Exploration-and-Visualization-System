@@ -10,6 +10,7 @@ from app.schemas.auth_schema import RegisterRequest
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
+# ✅ REGISTER (UNCHANGED - optional use)
 @router.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(
     request: RegisterRequest,
@@ -39,6 +40,7 @@ def register_user(
     }
 
 
+# ✅ LOGIN (UPDATED → AUTO REGISTER IF NOT EXISTS)
 @router.post("/login")
 def login_user(
     form_data: OAuth2PasswordRequestForm = Depends(),
@@ -46,18 +48,25 @@ def login_user(
 ):
     user = db.query(User).filter(User.email == form_data.username).first()
 
+    # 🔥 IF USER DOES NOT EXIST → CREATE USER
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
+        user = User(
+            email=form_data.username,
+            hashed_password=hash_password(form_data.password)
         )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
 
-    if not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
-        )
+    # 🔐 IF USER EXISTS → VERIFY PASSWORD
+    else:
+        if not verify_password(form_data.password, user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid password"
+            )
 
+    # 🎟 CREATE TOKEN
     access_token = create_access_token(data={"sub": str(user.id)})
 
     return {
