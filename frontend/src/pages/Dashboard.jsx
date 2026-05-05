@@ -24,6 +24,8 @@ import {
   Scatter,
   ScatterChart,
   Tooltip,
+  ReferenceLine,
+  ReferenceArea,
   XAxis,
   YAxis
 } from "recharts";
@@ -67,30 +69,98 @@ const getFailureLabel = (item) => {
   return shift ? `Machine ${machine} - Shift ${shift}` : `Machine ${machine}`;
 };
 
+const getSelectionLabel = (selectedValues, options, allLabel, singularLabel) => {
+  const active = selectedValues.length > 0 ? selectedValues : options;
+
+  if (active.length === 0 || active.length === options.length) {
+    return allLabel;
+  }
+
+  if (active.length <= 2) {
+    return active.map((item) => `Shift ${item}`).join(", ");
+  }
+
+  return `${active.length} ${singularLabel} Selected`;
+};
+
+const getEffectiveShiftSelection = (selectedValues, options) =>
+  selectedValues.length > 0 ? selectedValues : options;
+
 const CustomTooltip = ({ active, payload, label }) => {
   if (active && payload && payload.length) {
-    return (
-      <div
-        style={{
-          background: "#fff",
-          padding: "8px",
-          border: "1px solid #ccc",
-          borderRadius: "6px"
-        }}
-      >
-        <p>
-          <b>{label}</b>
-        </p>
+    const point = payload[0].payload;
 
-        {payload.map((item) => (
-          <p key={item.dataKey} style={{ color: item.color, margin: 0 }}>
-            {item.name || item.dataKey}: {item.value}
+    return (
+      <div style={{
+        background: "#fff",
+        padding: "10px",
+        border: "1px solid #ccc",
+        borderRadius: "8px"
+      }}>
+        <p><b>Hour:</b> {label}</p>
+
+        {payload.map((entry, i) => (
+          <p key={i} style={{ color: entry.color }}>
+            <b>{entry.name}:</b> {entry.value?.toFixed(2)}
           </p>
         ))}
+
+        {/* ✅ SAFE MACHINE DISPLAY */}
+        <p>
+          <b>Machines:</b>{" "}
+          {Array.isArray(point?.machines) && point.machines.length > 0
+            ? point.machines.join(", ")
+            : "N/A"}
+        </p>
       </div>
     );
   }
+  return null;
+};
+const HealthTooltip = ({ active, payload }) => {
+  if (active && payload && payload.length) {
+    const entry = payload[0]; // current bar
+    const point = entry.payload;
 
+    return (
+      <div style={{
+        background: "#fff",
+        padding: "10px",
+        border: "1px solid #ccc",
+        borderRadius: "8px"
+      }}>
+        {/* ✅ MACHINE */}
+        <p><b>Machine:</b> {point.machine}</p>
+
+        {/* ✅ SHIFT (from bar name) */}
+        <p><b>Shift:</b> {entry.name.replace("Shift ", "")}</p>
+
+        {/* ✅ VALUE (IMPORTANT FIX) */}
+        <p><b>Health Score:</b> {Number(entry.value).toFixed(2)}</p>
+      </div>
+    );
+  }
+  return null;
+};
+// ✅ FAILURE TOOLTIP
+const FailureTooltip = ({ active, payload }) => {
+  if (active && payload && payload.length) {
+    const point = payload[0].payload;
+
+    return (
+      <div style={{
+        background: "#fff",
+        padding: "10px",
+        border: "1px solid #ccc",
+        borderRadius: "8px"
+      }}>
+        <p><b>Machine:</b> {point.machine}</p>
+        <p><b>Shift:</b> {point.shift}</p>
+        <p><b>Failure Score:</b> {Number(point.failure_score).toFixed(2)}</p>
+        <p><b>Class:</b> {point.failure_class}</p>
+      </div>
+    );
+  }
   return null;
 };
 
@@ -125,6 +195,19 @@ const normalizeDateValue = (value) => {
   }
 
   return asString;
+};
+
+
+const getHourBucket = (logDate) => {
+  if (!logDate) return null;
+
+  const date = new Date(logDate);
+
+  if (isNaN(date)) return null;
+
+  const hour = date.getHours().toString().padStart(2, "0");
+
+  return `${hour}:00`;   // ✅ IMPORTANT
 };
 
 const sortMixedValues = (values) =>
@@ -176,8 +259,20 @@ const detectBlendColumn = (cols) =>
 const detectDateColumn = (cols) =>
   cols.find((col) => {
     const name = String(col).toLowerCase().trim();
-
     return name === "production date" || name === "date" || name.includes("date");
+  }) || "";
+
+const detectLogDateColumn = (cols) =>
+  cols.find((col) => {
+    const name = String(col).toLowerCase().trim();
+
+    return (
+      name === "log date" ||
+      name === "logdate" ||
+      name.includes("log date") ||
+      name.includes("log time") ||
+      name.includes("timestamp")
+    );
   }) || "";
 
 const detectDayColumn = (cols) =>
@@ -239,56 +334,66 @@ const aggregateByShift = (rows, shiftKey, valueKey) => {
   }));
 };
 
-const aggregateShiftMachineSeries = (
+const aggregateShiftHourlySeries = (
   rows,
   shiftKey,
   machineKey,
+  logDateKey,
   valueKey,
-  selectedShiftKeys
+  selectedShiftKeys,
+  selectedMachines
 ) => {
-  if (!shiftKey || !machineKey || !valueKey) return [];
+  const grouped = {};
 
-  const grouped = rows.reduce((acc, row) => {
+  selectedShiftKeys = selectedShiftKeys || [];
+  selectedMachines = selectedMachines || [];
+
+  rows.forEach((row) => {
     const shift = normalizeShift(row[shiftKey]);
     const machine = String(row[machineKey] || "").trim();
+    const hour = getHourBucket(row[logDateKey]);
     const value = Number(row[valueKey]);
 
-    if (!selectedShiftKeys.includes(shift) || !machine || Number.isNaN(value)) {
-      return acc;
-    }
+    if (
+      !selectedShiftKeys.includes(shift) ||
+      !selectedMachines.includes(machine) ||
+      !hour ||
+      Number.isNaN(value)
+    ) return;
 
-    const pointKey = `${shift}-${machine}`;
-
-    if (!acc[pointKey]) {
-      acc[pointKey] = {
-        shift,
-        machine,
-        label: `${shift}-${machine}`
+    // ✅ GROUP BY HOUR ONLY
+    if (!grouped[hour]) {
+      grouped[hour] = {
+        hour,
+        machines: new Set()
       };
 
-      selectedShiftKeys.forEach((key) => {
-        acc[pointKey][key] = null;
+      selectedShiftKeys.forEach((s) => {
+        grouped[hour][s] = null;
+        grouped[hour][`${s}_total`] = 0;
+        grouped[hour][`${s}_count`] = 0;
       });
     }
 
-    acc[pointKey][shift] = value;
+    // ✅ track machines
+    grouped[hour].machines.add(machine);
 
-    return acc;
-  }, {});
+    // ✅ aggregate shift values
+    grouped[hour][`${shift}_total`] += value;
+    grouped[hour][`${shift}_count`] += 1;
 
-  return Object.values(grouped).sort((a, b) => {
-    const shiftDiff = selectedShiftKeys.indexOf(a.shift) - selectedShiftKeys.indexOf(b.shift);
-    if (shiftDiff !== 0) return shiftDiff;
-
-    const aNum = Number(a.machine);
-    const bNum = Number(b.machine);
-
-    if (!Number.isNaN(aNum) && !Number.isNaN(bNum)) return aNum - bNum;
-
-    return a.machine.localeCompare(b.machine);
+    grouped[hour][shift] =
+      grouped[hour][`${shift}_total`] /
+      grouped[hour][`${shift}_count`];
   });
-};
 
+  return Object.values(grouped)
+    .map((d) => ({
+      ...d,
+      machines: [...d.machines] // convert Set → array
+    }))
+    .sort((a, b) => a.hour.localeCompare(b.hour));
+};
 const transformHealthData = (data) => {
   if (!data || !Array.isArray(data.results)) return [];
 
@@ -313,12 +418,11 @@ const transformHealthData = (data) => {
     const bNum = Number(b.machine);
 
     if (!Number.isNaN(aNum) && !Number.isNaN(bNum)) return aNum - bNum;
-
     return a.machine.localeCompare(b.machine);
   });
 };
 
-const getHealthSummaryForShift = (data, selectedShift = "ALL") => {
+const getHealthSummaryForShiftSelection = (data, selectedShifts, availableShifts) => {
   if (!data || !Array.isArray(data.results)) {
     return {
       average_score: 0,
@@ -327,10 +431,9 @@ const getHealthSummaryForShift = (data, selectedShift = "ALL") => {
     };
   }
 
-  const rows =
-    selectedShift === "ALL"
-      ? data.results
-      : data.results.filter((item) => normalizeShift(item.shift) === selectedShift);
+  const activeShifts = getEffectiveShiftSelection(selectedShifts, availableShifts);
+
+  const rows = data.results.filter((item) => activeShifts.includes(normalizeShift(item.shift)));
 
   if (rows.length === 0) {
     return {
@@ -340,8 +443,7 @@ const getHealthSummaryForShift = (data, selectedShift = "ALL") => {
     };
   }
 
-  const average =
-    rows.reduce((sum, item) => sum + Number(item.score || 0), 0) / rows.length;
+  const average = rows.reduce((sum, item) => sum + Number(item.score || 0), 0) / rows.length;
 
   return {
     average_score: Number(average.toFixed(2)),
@@ -355,6 +457,12 @@ const getHealthSummaryForShift = (data, selectedShift = "ALL") => {
 };
 
 function Dashboard() {
+  const navigate = useNavigate();
+
+  const rawToken = localStorage.getItem("token");
+  const token =
+    rawToken && rawToken !== "null" && rawToken !== "undefined" ? rawToken : null;
+
   const [selectedFile, setSelectedFile] = useState(null);
   const [datasets, setDatasets] = useState([]);
   const [previewData, setPreviewData] = useState([]);
@@ -365,6 +473,7 @@ function Dashboard() {
   const [cigaretteColumn, setCigaretteColumn] = useState("");
   const [blendColumn, setBlendColumn] = useState("");
   const [dateColumn, setDateColumn] = useState("");
+  const [logDateColumn, setLogDateColumn] = useState("");
   const [dayColumn, setDayColumn] = useState("");
   const [shiftColumn, setShiftColumn] = useState("");
   const [crewColumn, setCrewColumn] = useState("");
@@ -374,6 +483,9 @@ function Dashboard() {
   const [selectedShifts, setSelectedShifts] = useState([]);
   const [selectedCrews, setSelectedCrews] = useState([]);
   const [selectedMachines, setSelectedMachines] = useState([]);
+
+  const [selectedHealthShifts, setSelectedHealthShifts] = useState([]);
+  const [selectedFailureShifts, setSelectedFailureShifts] = useState([]);
 
   const [yAxis, setYAxis] = useState("");
   const [chartType, setChartType] = useState("bar");
@@ -386,7 +498,6 @@ function Dashboard() {
   const [summaryData, setSummaryData] = useState(null);
   const [forecastData, setForecastData] = useState(null);
   const [chartSuggestion, setChartSuggestion] = useState(null);
-  const [selectedHealthShift, setSelectedHealthShift] = useState("ALL");
 
   const [isDetectingAnomalies, setIsDetectingAnomalies] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -398,25 +509,41 @@ function Dashboard() {
   const [isShiftDropdownOpen, setIsShiftDropdownOpen] = useState(false);
   const [isCrewDropdownOpen, setIsCrewDropdownOpen] = useState(false);
   const [isMachineDropdownOpen, setIsMachineDropdownOpen] = useState(false);
+  const [isHealthShiftDropdownOpen, setIsHealthShiftDropdownOpen] = useState(false);
+  const [isFailureShiftDropdownOpen, setIsFailureShiftDropdownOpen] = useState(false);
 
   const fileInputRef = useRef(null);
   const uploadInProgressRef = useRef(false);
+
   const dateDropdownRef = useRef(null);
   const dayDropdownRef = useRef(null);
   const shiftDropdownRef = useRef(null);
   const crewDropdownRef = useRef(null);
   const machineDropdownRef = useRef(null);
+  const healthShiftDropdownRef = useRef(null);
+  const failureShiftDropdownRef = useRef(null);
 
   const mainChartRef = useRef(null);
   const healthChartRef = useRef(null);
   const failureChartRef = useRef(null);
   const forecastChartRef = useRef(null);
 
-  const navigate = useNavigate();
-  const token = localStorage.getItem("token");
+  const logoutAndRedirect = useCallback(() => {
+    localStorage.removeItem("token");
+    localStorage.removeItem("userEmail");
+    setDatasets([]);
+    setPreviewData([]);
+    setCurrentDatasetId(null);
+    navigate("/");
+  }, [navigate]);
 
   useEffect(() => {
     if (!token) {
+      localStorage.removeItem("token");
+      localStorage.removeItem("userEmail");
+      setDatasets([]);
+      setPreviewData([]);
+      setCurrentDatasetId(null);
       navigate("/");
     }
   }, [token, navigate]);
@@ -426,29 +553,28 @@ function Dashboard() {
       if (dateDropdownRef.current && !dateDropdownRef.current.contains(event.target)) {
         setIsDateDropdownOpen(false);
       }
-
       if (dayDropdownRef.current && !dayDropdownRef.current.contains(event.target)) {
         setIsDayDropdownOpen(false);
       }
-
       if (shiftDropdownRef.current && !shiftDropdownRef.current.contains(event.target)) {
         setIsShiftDropdownOpen(false);
       }
-
       if (crewDropdownRef.current && !crewDropdownRef.current.contains(event.target)) {
         setIsCrewDropdownOpen(false);
       }
-
       if (machineDropdownRef.current && !machineDropdownRef.current.contains(event.target)) {
         setIsMachineDropdownOpen(false);
+      }
+      if (healthShiftDropdownRef.current && !healthShiftDropdownRef.current.contains(event.target)) {
+        setIsHealthShiftDropdownOpen(false);
+      }
+      if (failureShiftDropdownRef.current && !failureShiftDropdownRef.current.contains(event.target)) {
+        setIsFailureShiftDropdownOpen(false);
       }
     };
 
     document.addEventListener("mousedown", handleClickOutside);
-
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
+    return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
   const clearInsights = () => {
@@ -459,7 +585,8 @@ function Dashboard() {
     setSummaryData(null);
     setForecastData(null);
     setChartSuggestion(null);
-    setSelectedHealthShift("ALL");
+    setSelectedHealthShifts([]);
+    setSelectedFailureShifts([]);
   };
 
   const resetFiltersAndSelections = () => {
@@ -467,6 +594,7 @@ function Dashboard() {
     setCigaretteColumn("");
     setBlendColumn("");
     setDateColumn("");
+    setLogDateColumn("");
     setDayColumn("");
     setShiftColumn("");
     setCrewColumn("");
@@ -475,46 +603,32 @@ function Dashboard() {
     setSelectedShifts([]);
     setSelectedCrews([]);
     setSelectedMachines([]);
+    setSelectedHealthShifts([]);
+    setSelectedFailureShifts([]);
     setYAxis("");
     setChartType("bar");
     setLineViewMode("shiftCompare");
   };
 
-  const fetchDatasets = useCallback(async () => {
-    try {
-      const res = await fetch("http://localhost:8000/datasets/", {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json"
-        }
-      });
-
-      if (!res.ok) {
-        setDatasets([]);
-        return;
-      }
-
-      const data = await res.json();
-      setDatasets(Array.isArray(data) ? data : []);
-    } catch (error) {
-      console.error("Dataset fetch error:", error);
-      setDatasets([]);
-    }
-  }, [token]);
-
-  useEffect(() => {
-    fetchDatasets();
-  }, [fetchDatasets]);
-
   const fetchApi = useCallback(
     async (url, fallbackMessage, stateSetter) => {
+      if (!token) {
+        logoutAndRedirect();
+        throw new Error("Unauthorized");
+      }
+
       try {
         const res = await fetch(url, {
           headers: {
             Authorization: `Bearer ${token}`
           }
         });
+
+        if (res.status === 401) {
+          alert("Session expired. Please login again.");
+          logoutAndRedirect();
+          throw new Error("Unauthorized");
+        }
 
         if (!res.ok) {
           const errorData = await res.json().catch(() => ({}));
@@ -529,14 +643,64 @@ function Dashboard() {
 
         return data;
       } catch (error) {
-        alert(error.message || fallbackMessage);
+        if (error.message !== "Unauthorized") {
+          alert(error.message || fallbackMessage);
+        }
         throw error;
       }
     },
-    [token]
+    [token, logoutAndRedirect]
   );
 
+  const fetchDatasets = useCallback(async () => {
+    if (!token) {
+      setDatasets([]);
+      navigate("/");
+      return;
+    }
+
+    try {
+      const res = await fetch("http://localhost:8000/datasets/", {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        }
+      });
+
+      if (res.status === 401) {
+        localStorage.removeItem("token");
+        localStorage.removeItem("userEmail");
+        setDatasets([]);
+        navigate("/");
+        return;
+      }
+
+      if (!res.ok) {
+        setDatasets([]);
+        return;
+      }
+
+      const data = await res.json();
+      setDatasets(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error("Dataset fetch error:", error);
+      setDatasets([]);
+    }
+  }, [token, navigate]);
+
+  useEffect(() => {
+    if (!token) return;
+    fetchDatasets();
+  }, [fetchDatasets, token]);
+
   const handleUpload = async () => {
+    if (!token) {
+      alert("Please login again.");
+      logoutAndRedirect();
+      return;
+    }
+
     if (!selectedFile || uploadInProgressRef.current) return;
 
     uploadInProgressRef.current = true;
@@ -554,6 +718,14 @@ function Dashboard() {
         body: formData
       });
 
+      const data = await res.json().catch(() => ({}));
+
+      if (res.status === 401) {
+        alert("Session expired. Please login again.");
+        logoutAndRedirect();
+        return;
+      }
+
       if (res.ok) {
         alert("Upload successful");
         setSelectedFile(null);
@@ -564,7 +736,7 @@ function Dashboard() {
 
         await fetchDatasets();
       } else {
-        alert("Upload failed");
+        alert(data.detail || "Upload failed");
       }
     } catch (error) {
       console.error("Upload error:", error);
@@ -576,17 +748,26 @@ function Dashboard() {
   };
 
   const fetchSheetData = async (datasetId, sheetName) => {
+    if (!token) {
+      logoutAndRedirect();
+      return;
+    }
+
     try {
       const res = await fetch(
-        `http://localhost:8000/datasets/${datasetId}/data?sheet_name=${encodeURIComponent(
-          sheetName
-        )}`,
+        `http://localhost:8000/datasets/${datasetId}/data?sheet_name=${encodeURIComponent(sheetName)}`,
         {
           headers: {
             Authorization: `Bearer ${token}`
           }
         }
       );
+
+      if (res.status === 401) {
+        alert("Session expired. Please login again.");
+        logoutAndRedirect();
+        return;
+      }
 
       if (!res.ok) {
         setPreviewData([]);
@@ -598,7 +779,6 @@ function Dashboard() {
 
       const data = await res.json();
       const rows = data.data || [];
-
       setPreviewData(rows);
 
       if (rows.length > 0) {
@@ -608,6 +788,7 @@ function Dashboard() {
         const detectedCigarette = detectCigaretteColumn(cols);
         const detectedBlend = detectBlendColumn(cols);
         const detectedDate = detectDateColumn(cols);
+        const detectedLogDate = detectLogDateColumn(cols);
         const detectedDay = detectDayColumn(cols);
         const detectedShift = detectShiftColumn(cols);
         const detectedCrew = detectCrewColumn(cols);
@@ -617,30 +798,25 @@ function Dashboard() {
         setCigaretteColumn(detectedCigarette);
         setBlendColumn(detectedBlend);
         setDateColumn(detectedDate);
+        setLogDateColumn(detectedLogDate);
         setDayColumn(detectedDay);
         setShiftColumn(detectedShift);
         setCrewColumn(detectedCrew);
 
         const machineList = sortMixedValues(
-          [...new Set(rows.map((row) => String(row[detectedMachine] || "").trim()))].filter(
-            Boolean
-          )
+          [...new Set(rows.map((row) => String(row[detectedMachine] || "").trim()))].filter(Boolean)
         );
 
         setSelectedMachines(machineList);
 
         const selectableColumns = cols.filter((col) => {
-          if (col === detectedMachine) return false;
+          if (col === detectedMachine || col === detectedDate || col === detectedLogDate) {
+            return false;
+          }
 
           return rows.some((row) => {
             const value = row[col];
-
-            return (
-              value !== null &&
-              value !== undefined &&
-              value !== "" &&
-              !Number.isNaN(Number(value))
-            );
+            return value !== null && value !== undefined && value !== "" && !Number.isNaN(Number(value));
           });
         });
 
@@ -667,12 +843,23 @@ function Dashboard() {
   };
 
   const fetchSheets = async (datasetId) => {
+    if (!token) {
+      logoutAndRedirect();
+      return;
+    }
+
     try {
       const res = await fetch(`http://localhost:8000/datasets/${datasetId}/sheets`, {
         headers: {
           Authorization: `Bearer ${token}`
         }
       });
+
+      if (res.status === 401) {
+        alert("Session expired. Please login again.");
+        logoutAndRedirect();
+        return;
+      }
 
       if (!res.ok) return;
 
@@ -698,6 +885,11 @@ function Dashboard() {
   };
 
   const handleDelete = async (id) => {
+    if (!token) {
+      logoutAndRedirect();
+      return;
+    }
+
     if (!window.confirm("Delete this dataset?")) return;
 
     try {
@@ -707,6 +899,12 @@ function Dashboard() {
           Authorization: `Bearer ${token}`
         }
       });
+
+      if (res.status === 401) {
+        alert("Session expired. Please login again.");
+        logoutAndRedirect();
+        return;
+      }
 
       if (res.ok) {
         alert("Dataset deleted");
@@ -730,33 +928,25 @@ function Dashboard() {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem("token");
-    navigate("/");
+    logoutAndRedirect();
   };
 
   const dateOptions = useMemo(() => {
     if (!dateColumn) return [];
-
     return sortMixedValues(
-      [...new Set(previewData.map((row) => normalizeDateValue(row[dateColumn])))].filter(
-        Boolean
-      )
+      [...new Set(previewData.map((row) => normalizeDateValue(row[dateColumn])))].filter(Boolean)
     );
   }, [previewData, dateColumn]);
 
   const dayOptions = useMemo(() => {
     if (!dayColumn) return [];
-
     return sortMixedValues(
-      [...new Set(previewData.map((row) => String(row[dayColumn] || "").trim()))].filter(
-        Boolean
-      )
+      [...new Set(previewData.map((row) => String(row[dayColumn] || "").trim()))].filter(Boolean)
     );
   }, [previewData, dayColumn]);
 
   const shiftOptions = useMemo(() => {
     if (!shiftColumn) return [];
-
     return SHIFT_ORDER.filter((shift) =>
       previewData.some((row) => normalizeShift(row[shiftColumn]) === shift)
     );
@@ -764,19 +954,14 @@ function Dashboard() {
 
   const crewOptions = useMemo(() => {
     if (!crewColumn) return [];
-
     return sortMixedValues(
-      [...new Set(previewData.map((row) => String(row[crewColumn] || "").trim()))].filter(
-        Boolean
-      )
+      [...new Set(previewData.map((row) => String(row[crewColumn] || "").trim()))].filter(Boolean)
     );
   }, [previewData, crewColumn]);
 
   const activeShiftKeys = useMemo(() => {
     if (!shiftColumn) return [];
-
     const source = selectedShifts.length > 0 ? selectedShifts : shiftOptions;
-
     return SHIFT_ORDER.filter((shift) => source.includes(shift));
   }, [shiftColumn, selectedShifts, shiftOptions]);
 
@@ -810,9 +995,7 @@ function Dashboard() {
     if (!machineColumn) return [];
 
     return sortMixedValues(
-      [...new Set(baseFilteredData.map((row) => String(row[machineColumn] || "").trim()))].filter(
-        Boolean
-      )
+      [...new Set(baseFilteredData.map((row) => String(row[machineColumn] || "").trim()))].filter(Boolean)
     );
   }, [baseFilteredData, machineColumn]);
 
@@ -820,7 +1003,6 @@ function Dashboard() {
     if (machineOptions.length > 0) {
       setSelectedMachines((prev) => {
         const validSelection = prev.filter((machine) => machineOptions.includes(machine));
-
         return validSelection.length > 0 ? validSelection : machineOptions;
       });
     } else {
@@ -836,56 +1018,71 @@ function Dashboard() {
 
   const yAxisOptions = useMemo(() => {
     return columns.filter((col) => {
-      if (col === machineColumn) return false;
+      if (col === machineColumn || col === dateColumn || col === logDateColumn) return false;
 
       return previewData.some((row) => {
         const value = row[col];
-
-        return (
-          value !== null &&
-          value !== undefined &&
-          value !== "" &&
-          !Number.isNaN(Number(value))
-        );
+        return value !== null && value !== undefined && value !== "" && !Number.isNaN(Number(value));
       });
     });
-  }, [columns, machineColumn, previewData]);
+  }, [columns, machineColumn, dateColumn, logDateColumn, previewData]);
 
   const isYAxisNumeric =
-    yAxis &&
-    filteredData.some((row) => row[yAxis] !== "" && !Number.isNaN(Number(row[yAxis])));
+    yAxis && filteredData.some((row) => row[yAxis] !== "" && !Number.isNaN(Number(row[yAxis])));
 
   const machineChartData = useMemo(() => {
     if (!isYAxisNumeric) return [];
-
     return aggregateByMachine(filteredData, machineColumn, yAxis);
   }, [filteredData, machineColumn, yAxis, isYAxisNumeric]);
 
   const shiftChartData = useMemo(() => {
     if (!isYAxisNumeric || !shiftColumn) return [];
-
     return aggregateByShift(filteredData, shiftColumn, yAxis);
   }, [filteredData, shiftColumn, yAxis, isYAxisNumeric]);
 
-  const combinedShiftLineData = useMemo(() => {
-    if (!isYAxisNumeric || !shiftColumn || !machineColumn || chartType !== "line") {
-      return [];
-    }
+const combinedShiftLineData = useMemo(() => {
+  if (
+    !isYAxisNumeric ||
+    !shiftColumn ||
+    !machineColumn ||
+    !logDateColumn ||
+    chartType !== "line"
+  ) {
+    return [];
+  }
 
-    return aggregateShiftMachineSeries(
-      filteredData,
-      shiftColumn,
-      machineColumn,
-      yAxis,
-      activeShiftKeys
-    );
-  }, [filteredData, shiftColumn, machineColumn, yAxis, activeShiftKeys, isYAxisNumeric, chartType]);
+  const result = aggregateShiftHourlySeries(
+    filteredData,
+    shiftColumn,
+    machineColumn,
+    logDateColumn,
+    yAxis,
+    activeShiftKeys,
+    selectedMachines   // ✅ IMPORTANT (you missed this earlier)
+  );
+
+  // ✅ NOW LOG WORKS
+  console.log("Line Data:", result);
+
+  return result;
+}, [
+  filteredData,
+  shiftColumn,
+  machineColumn,
+  logDateColumn,
+  yAxis,
+  activeShiftKeys,
+  selectedMachines,   // ✅ add this also
+  isYAxisNumeric,
+  chartType
+]);
 
   const useCombinedShiftLineChart =
     chartType === "line" &&
     lineViewMode === "shiftCompare" &&
     Boolean(shiftColumn) &&
     Boolean(machineColumn) &&
+    Boolean(logDateColumn) &&
     activeShiftKeys.length > 0 &&
     combinedShiftLineData.length > 0;
 
@@ -910,7 +1107,6 @@ function Dashboard() {
     }
 
     const source = useShiftAxisChart ? shiftChartData : machineChartData;
-
     return source.map((row) => Number(row[yAxis])).filter((value) => !Number.isNaN(value));
   }, [
     isYAxisNumeric,
@@ -940,15 +1136,13 @@ function Dashboard() {
       .slice(0, 6)
       .map((col) => {
         const selectedMachine = selectedMachines[0];
-
         const selectedRows = baseFilteredData.filter(
           (row) => String(row[machineColumn] || "").trim() === selectedMachine
         );
 
         const selectedValue =
           selectedRows.length > 0
-            ? selectedRows.reduce((sum, row) => sum + (Number(row[col]) || 0), 0) /
-              selectedRows.length
+            ? selectedRows.reduce((sum, row) => sum + (Number(row[col]) || 0), 0) / selectedRows.length
             : 0;
 
         const averageValue =
@@ -975,11 +1169,7 @@ function Dashboard() {
         if (!machine) return acc;
 
         if (!acc[machine]) {
-          acc[machine] = {
-            machine,
-            cigarette,
-            blend
-          };
+          acc[machine] = { machine, cigarette, blend };
         }
 
         if (cigarette) acc[machine].cigarette = cigarette;
@@ -990,24 +1180,65 @@ function Dashboard() {
     ).sort((a, b) => Number(a.machine) - Number(b.machine));
   }, [baseFilteredData, machineColumn, cigaretteColumn, blendColumn]);
 
-  const healthChartData = transformHealthData(healthData).slice(0, 12);
-  const healthShiftSummary = getHealthSummaryForShift(healthData, selectedHealthShift);
+  const healthShiftOptions = useMemo(() => {
+    if (!healthData?.results?.length) return [];
+    return SHIFT_ORDER.filter((shift) =>
+      healthData.results.some((item) => normalizeShift(item.shift) === shift)
+    );
+  }, [healthData]);
+
+  const activeHealthShifts = useMemo(
+    () => getEffectiveShiftSelection(selectedHealthShifts, healthShiftOptions),
+    [selectedHealthShifts, healthShiftOptions]
+  );
+
+  const healthChartData = useMemo(() => transformHealthData(healthData).slice(0, 12), [healthData]);
+
+  const healthShiftSummary = useMemo(
+    () => getHealthSummaryForShiftSelection(healthData, selectedHealthShifts, healthShiftOptions),
+    [healthData, selectedHealthShifts, healthShiftOptions]
+  );
+
+  const failureShiftOptions = useMemo(() => {
+    if (!failureData?.results?.length) return [];
+    return SHIFT_ORDER.filter((shift) =>
+      failureData.results.some((item) => normalizeShift(item.shift) === shift)
+    );
+  }, [failureData]);
+
+  const activeFailureShifts = useMemo(
+    () => getEffectiveShiftSelection(selectedFailureShifts, failureShiftOptions),
+    [selectedFailureShifts, failureShiftOptions]
+  );
+
+  const filteredFailureResults = useMemo(() => {
+    if (!failureData?.results?.length) return [];
+    return failureData.results.filter((item) =>
+      activeFailureShifts.includes(normalizeShift(item.shift))
+    );
+  }, [failureData, activeFailureShifts]);
+
+  const failureSummary = useMemo(() => {
+    if (filteredFailureResults.length === 0) {
+      return { top_risk_machine: null };
+    }
+
+    const sorted = [...filteredFailureResults].sort(
+      (a, b) => Number(b.failure_score) - Number(a.failure_score)
+    );
+
+    return { top_risk_machine: sorted[0] };
+  }, [filteredFailureResults]);
 
   const failureTop = useMemo(() => {
-    return (failureData?.results || []).slice(0, 8).map((item) => ({
+    return filteredFailureResults.slice(0, 8).map((item) => ({
       ...item,
       label: getFailureLabel(item)
     }));
-  }, [failureData]);
+  }, [filteredFailureResults]);
 
   const handleMultiToggle = (value, setter) => {
-    setter((prev) => {
-      if (prev.includes(value)) {
-        return prev.filter((item) => item !== value);
-      }
-
-      return [...prev, value];
-    });
+    setter((prev) => (prev.includes(value) ? prev.filter((item) => item !== value) : [...prev, value]));
   };
 
   const handleAllMultiToggle = (options, selectedValues, setter) => {
@@ -1019,13 +1250,11 @@ function Dashboard() {
   };
 
   const handleMachineToggle = (machine) => {
-    setSelectedMachines((prev) => {
-      if (prev.includes(machine)) {
-        return prev.filter((item) => item !== machine);
-      }
-
-      return sortMixedValues([...prev, machine]);
-    });
+    setSelectedMachines((prev) =>
+      prev.includes(machine)
+        ? prev.filter((item) => item !== machine)
+        : sortMixedValues([...prev, machine])
+    );
   };
 
   const handleAllMachinesToggle = () => {
@@ -1042,7 +1271,6 @@ function Dashboard() {
   const buildSelectionLabel = (selectedValues, allLabel, itemLabel) => {
     if (selectedValues.length === 0) return allLabel;
     if (selectedValues.length <= 2) return selectedValues.join(", ");
-
     return `${selectedValues.length} ${itemLabel} Selected`;
   };
 
@@ -1050,10 +1278,10 @@ function Dashboard() {
     selectedMachines.length === 0
       ? "Select Machines"
       : allMachinesChecked
-      ? "All Machines"
-      : selectedMachines.length <= 3
-      ? selectedMachines.join(", ")
-      : `${selectedMachines.length} Machines Selected`;
+        ? "All Machines"
+        : selectedMachines.length <= 3
+          ? selectedMachines.join(", ")
+          : `${selectedMachines.length} Machines Selected`;
 
   const fetchAnomalies = async () => {
     if (!currentDatasetId || !yAxis || !isYAxisNumeric) {
@@ -1065,21 +1293,18 @@ function Dashboard() {
 
     try {
       const data = await fetchApi(
-        `http://localhost:8000/datasets/${currentDatasetId}/anomaly?parameter=${encodeURIComponent(
-          yAxis
-        )}`,
+        `http://localhost:8000/datasets/${currentDatasetId}/anomaly?parameter=${encodeURIComponent(yAxis)}`,
         "Failed to detect anomalies"
       );
 
       const nextMap = {};
-
       data.results.forEach((item) => {
         nextMap[String(item.machine).trim()] = Boolean(item.is_anomaly);
       });
 
       setAnomalyMap(nextMap);
       setAnomalySummary(data.summary);
-    } catch (error) {
+    } catch {
       setAnomalyMap({});
       setAnomalySummary(null);
     } finally {
@@ -1089,7 +1314,6 @@ function Dashboard() {
 
   const fetchHealthScores = async () => {
     if (!currentDatasetId) return;
-
     setIsLoadingInsights(true);
 
     try {
@@ -1105,7 +1329,6 @@ function Dashboard() {
 
   const fetchFailureClassification = async () => {
     if (!currentDatasetId) return;
-
     setIsLoadingInsights(true);
 
     try {
@@ -1121,14 +1344,11 @@ function Dashboard() {
 
   const fetchAiSummary = async () => {
     if (!currentDatasetId) return;
-
     setIsLoadingInsights(true);
 
     try {
       await fetchApi(
-        `http://localhost:8000/datasets/${currentDatasetId}/summary?parameter=${encodeURIComponent(
-          yAxis || ""
-        )}`,
+        `http://localhost:8000/datasets/${currentDatasetId}/summary?parameter=${encodeURIComponent(yAxis || "")}`,
         "Failed to load AI summary",
         setSummaryData
       );
@@ -1147,9 +1367,7 @@ function Dashboard() {
 
     try {
       await fetchApi(
-        `http://localhost:8000/datasets/${currentDatasetId}/forecast?parameter=${encodeURIComponent(
-          yAxis
-        )}`,
+        `http://localhost:8000/datasets/${currentDatasetId}/forecast?parameter=${encodeURIComponent(yAxis)}`,
         "Failed to load forecast",
         setForecastData
       );
@@ -1160,14 +1378,12 @@ function Dashboard() {
 
   const downloadChartFromRef = (ref, fileName) => {
     const wrapper = ref.current;
-
     if (!wrapper) {
       alert("No chart available to download");
       return;
     }
 
     const svg = wrapper.querySelector("svg");
-
     if (!svg) {
       alert("No chart available to download");
       return;
@@ -1184,10 +1400,7 @@ function Dashboard() {
       source = source.replace("<svg", '<svg xmlns:xlink="http://www.w3.org/1999/xlink"');
     }
 
-    const blob = new Blob([source], {
-      type: "image/svg+xml;charset=utf-8"
-    });
-
+    const blob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
 
@@ -1215,10 +1428,7 @@ function Dashboard() {
       source = source.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"');
     }
 
-    const svgBlob = new Blob([source], {
-      type: "image/svg+xml;charset=utf-8"
-    });
-
+    const svgBlob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
     const url = URL.createObjectURL(svgBlob);
 
     return new Promise((resolve) => {
@@ -1230,13 +1440,11 @@ function Dashboard() {
         canvas.height = img.height || 700;
 
         const ctx = canvas.getContext("2d");
-
         ctx.fillStyle = "#ffffff";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(img, 0, 0);
 
         const imageData = canvas.toDataURL("image/png");
-
         URL.revokeObjectURL(url);
         resolve(imageData);
       };
@@ -1253,28 +1461,23 @@ function Dashboard() {
   const addWrappedText = (pdf, text, x, y, maxWidth, lineHeight = 7) => {
     const lines = pdf.splitTextToSize(text, maxWidth);
     pdf.text(lines, x, y);
-
     return y + lines.length * lineHeight;
   };
 
   const ensurePageSpace = (pdf, y, neededHeight, margin) => {
     const pageHeight = pdf.internal.pageSize.getHeight();
-
     if (y + neededHeight > pageHeight - margin) {
       pdf.addPage();
       return margin;
     }
-
     return y;
   };
 
   const addSectionTitle = (pdf, title, y, margin) => {
     y = ensurePageSpace(pdf, y, 18, margin);
-
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(15);
     pdf.text(title, margin, y);
-
     return y + 8;
   };
 
@@ -1287,7 +1490,6 @@ function Dashboard() {
 
     y = addSectionTitle(pdf, title, y, margin);
     y = ensurePageSpace(pdf, y, chartHeight + 10, margin);
-
     pdf.addImage(imageData, "PNG", margin, y, usableWidth, chartHeight);
 
     return y + chartHeight + 10;
@@ -1336,10 +1538,6 @@ function Dashboard() {
       y += 12;
 
       y = addSectionTitle(pdf, "Report Overview", y, margin);
-
-      pdf.setFont("helvetica", "normal");
-      pdf.setFontSize(11);
-
       y = addWrappedText(
         pdf,
         "This report summarizes the selected dataset visualization and analytical results generated from the dashboard.",
@@ -1347,12 +1545,10 @@ function Dashboard() {
         y,
         contentWidth
       );
-
       y += 6;
 
       if (isYAxisNumeric && numericValues.length > 0 && yAxis) {
         y = addSectionTitle(pdf, "Graph Analysis", y, margin);
-
         y = addWrappedText(
           pdf,
           `The selected parameter ${yAxis} ranges from ${minValue} to ${maxValue}, with an average value of ${avgValue}.`,
@@ -1360,7 +1556,6 @@ function Dashboard() {
           y,
           contentWidth
         );
-
         y += 6;
       }
 
@@ -1374,7 +1569,6 @@ function Dashboard() {
 
       if (anomalySummary) {
         y = addSectionTitle(pdf, "Anomaly Detection", y, margin);
-
         y = addWrappedText(
           pdf,
           `Detected ${anomalySummary.anomalies} anomalies out of ${anomalySummary.total} machine samples. Abnormal machines: ${
@@ -1384,13 +1578,11 @@ function Dashboard() {
           y,
           contentWidth
         );
-
         y += 6;
       }
 
       if (healthData?.results?.length > 0) {
         y = addSectionTitle(pdf, "Health Score Summary", y, margin);
-
         y = addWrappedText(
           pdf,
           `Average health score is ${healthShiftSummary.average_score}. Best machine: ${
@@ -1410,33 +1602,29 @@ function Dashboard() {
           y,
           contentWidth
         );
-
         y += 6;
+
         y = addChartToPdf(pdf, "Health Score Chart", healthChartImage, y, margin);
       }
 
-      if (failureData?.summary?.top_risk_machine) {
+      if (failureSummary.top_risk_machine) {
         y = addSectionTitle(pdf, "Failure Classification", y, margin);
-
         y = addWrappedText(
           pdf,
-          `Top risk: ${getFailureLabel(
-            failureData.summary.top_risk_machine
-          )}. Failure score: ${
-            failureData.summary.top_risk_machine.failure_score
-          }. Risk class: ${failureData.summary.top_risk_machine.failure_class}.`,
+          `Top risk: ${getFailureLabel(failureSummary.top_risk_machine)}. Failure score: ${
+            failureSummary.top_risk_machine.failure_score
+          }. Risk class: ${failureSummary.top_risk_machine.failure_class}.`,
           margin,
           y,
           contentWidth
         );
-
         y += 6;
+
         y = addChartToPdf(pdf, "Failure Classification Chart", failureChartImage, y, margin);
       }
 
       if (forecastData?.points?.length > 0) {
         y = addSectionTitle(pdf, "Forecast Analysis", y, margin);
-
         y = addWrappedText(
           pdf,
           `The predicted next value for ${yAxis} is ${
@@ -1446,8 +1634,8 @@ function Dashboard() {
           y,
           contentWidth
         );
-
         y += 6;
+
         y = addChartToPdf(pdf, "Forecast Chart", forecastChartImage, y, margin);
       }
 
@@ -1469,14 +1657,11 @@ function Dashboard() {
 
       try {
         const data = await fetchApi(
-          `http://localhost:8000/datasets/${currentDatasetId}/chart-suggestion?parameter=${encodeURIComponent(
-            yAxis || ""
-          )}`,
+          `http://localhost:8000/datasets/${currentDatasetId}/chart-suggestion?parameter=${encodeURIComponent(yAxis || "")}`,
           "Failed to load chart suggestion"
         );
-
         setChartSuggestion(data);
-      } catch (error) {
+      } catch {
         setChartSuggestion(null);
       }
     };
@@ -1488,7 +1673,6 @@ function Dashboard() {
     <div className="dashboard-container">
       <div className="sidebar">
         <h2 className="logo">DataDash</h2>
-
         <button className="logout-btn" onClick={handleLogout}>
           Logout
         </button>
@@ -1504,7 +1688,6 @@ function Dashboard() {
             onChange={(e) => setSelectedFile(e.target.files[0] || null)}
             disabled={isUploading}
           />
-
           <button
             className="upload-btn"
             onClick={handleUpload}
@@ -1526,12 +1709,10 @@ function Dashboard() {
             {datasets.map((file) => (
               <tr key={file.id}>
                 <td>{file.filename}</td>
-
                 <td className="action-buttons">
                   <button className="preview-btn" onClick={() => handlePreview(file.id)}>
                     Preview
                   </button>
-
                   <button className="delete-btn" onClick={() => handleDelete(file.id)}>
                     Delete
                   </button>
@@ -1553,7 +1734,6 @@ function Dashboard() {
               }}
             >
               <h3>Dataset Visualization</h3>
-
               <button onClick={downloadPdfReport} disabled={isDownloadingPdf}>
                 {isDownloadingPdf ? "Generating PDF..." : "Download Full PDF Report"}
               </button>
@@ -1660,9 +1840,7 @@ function Dashboard() {
                       <label className="machine-option machine-option-all">
                         <input
                           type="checkbox"
-                          checked={
-                            shiftOptions.length > 0 && selectedShifts.length === shiftOptions.length
-                          }
+                          checked={shiftOptions.length > 0 && selectedShifts.length === shiftOptions.length}
                           onChange={() =>
                             handleAllMultiToggle(shiftOptions, selectedShifts, setSelectedShifts)
                           }
@@ -1765,7 +1943,6 @@ function Dashboard() {
 
               <select value={yAxis} onChange={(e) => setYAxis(e.target.value)}>
                 <option value="">Select Parameter</option>
-
                 {yAxisOptions.map((col) => (
                   <option key={col} value={col}>
                     {col}
@@ -1785,7 +1962,7 @@ function Dashboard() {
 
               {chartType === "line" && (
                 <select value={lineViewMode} onChange={(e) => setLineViewMode(e.target.value)}>
-                  <option value="shiftCompare">Shift Compare</option>
+                  <option value="shiftCompare">Shift Time Compare</option>
                   <option value="machine">Machine Wise</option>
                   <option value="shiftSummary">Shift Summary</option>
                 </select>
@@ -1814,7 +1991,6 @@ function Dashboard() {
             {!isYAxisNumeric && yAxis && (
               <div className="metadata-box">
                 <h4>Selected Column</h4>
-
                 <p>
                   <b>{yAxis}</b> is a text/categorical column. Charts and analytics work only for
                   numeric columns.
@@ -1867,20 +2043,17 @@ function Dashboard() {
             )}
 
             <div className="chart-area" ref={mainChartRef}>
-              {chartType === "bar" &&
-                isYAxisNumeric &&
-                useShiftAxisChart &&
-                shiftChartData.length > 0 && (
-                  <ResponsiveContainer width="100%" height={360}>
-                    <BarChart data={shiftChartData}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="shift" />
-                      <YAxis />
-                      <Tooltip content={<CustomTooltip />} cursor={{ stroke: "#999" }} />
-                      <Bar dataKey={yAxis} fill="#6366F1" />
-                    </BarChart>
-                  </ResponsiveContainer>
-                )}
+              {chartType === "bar" && isYAxisNumeric && useShiftAxisChart && shiftChartData.length > 0 && (
+                <ResponsiveContainer width="100%" height={360}>
+                  <BarChart data={shiftChartData}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="shift" />
+                    <YAxis />
+                    <Tooltip content={<HealthTooltip />} />   ✅ cursor={{ stroke: "#999" }} />
+                    <Bar dataKey={yAxis} fill="#6366F1" />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
 
               {chartType === "bar" &&
                 machineColumn &&
@@ -1912,27 +2085,29 @@ function Dashboard() {
                 )}
 
               {chartType === "line" && isYAxisNumeric && useCombinedShiftLineChart && (
-                <ResponsiveContainer width="100%" height={380}>
-                  <LineChart data={combinedShiftLineData}>
+                <ResponsiveContainer width="100%" height={420}>
+                  <LineChart
+                    data={combinedShiftLineData}
+                    margin={{ top: 20, right: 20, left: 10, bottom: 20 }}
+                  >
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="label" />
+                    
+                    <ReferenceLine x="14:00" stroke="#999" strokeDasharray="3 3" />
+                    <ReferenceLine x="22:00" stroke="#999" strokeDasharray="3 3"/>
+
+                    <ReferenceArea x1="06:00" x2="14:00" lfill="#6366F1" fillOpacity={0.05} />
+                    <ReferenceArea x1="14:00" x2="22:00" label="#22C55E" fillOpacity={0.05} />
+                    <ReferenceArea x1="22:00" x2="24:00" label="#F59E0B" fillOpacity={0.05} />
+                    <XAxis dataKey="hour"
+                   />   
                     <YAxis />
-                    <Tooltip content={<CustomTooltip />} cursor={{ stroke: "#999" }} />
+                    <Tooltip content={<CustomTooltip />}/>
                     <Legend />
 
-                    {activeShiftKeys.map((shift) => (
-                      <Line
-                        key={shift}
-                        type="monotone"
-                        dataKey={shift}
-                        name={`Shift ${shift}`}
-                        stroke={SHIFT_COLORS[shift] || "#6366F1"}
-                        strokeWidth={2}
-                        connectNulls={false}
-                        dot={{ r: 4 }}
-                        activeDot={{ r: 6 }}
-                      />
-                    ))}
+                    <Line dataKey="E" name="Shift E" stroke="#6366F1" />
+                    <Line dataKey="L" name="Shift L" stroke="#22C55E" />
+                    <Line dataKey="N" name="Shift N" stroke="#F59E0B" />
+                      
                   </LineChart>
                 </ResponsiveContainer>
               )}
@@ -2092,20 +2267,20 @@ function Dashboard() {
                 </div>
               )}
 
-              {failureData?.summary?.top_risk_machine && (
+              {failureSummary.top_risk_machine && (
                 <div className="metadata-box">
                   <h4>Failure Classification</h4>
 
                   <p>
-                    Top risk: <b>{getFailureLabel(failureData.summary.top_risk_machine)}</b>
+                    Top risk: <b>{getFailureLabel(failureSummary.top_risk_machine)}</b>
                   </p>
 
                   <p>
-                    Failure score: <b>{failureData.summary.top_risk_machine.failure_score}</b>
+                    Failure score: <b>{failureSummary.top_risk_machine.failure_score}</b>
                   </p>
 
                   <p>
-                    Risk class: <b>{failureData.summary.top_risk_machine.failure_class}</b>
+                    Risk class: <b>{failureSummary.top_risk_machine.failure_class}</b>
                   </p>
                 </div>
               )}
@@ -2114,14 +2289,30 @@ function Dashboard() {
                 <div className="metadata-box">
                   <h4>Graph Analysis</h4>
 
-                  <p>
-                    This chart compares <b>{yAxis}</b> values across machines.
-                  </p>
+                  {useCombinedShiftLineChart ? (
+                    <>
+                      <p>
+                        This chart compares <b>{yAxis}</b> using <b>machine number</b>, <b>shift</b>,
+                        and <b>hourly time</b>.
+                      </p>
 
-                  <p>
-                    The values range between <b>{minValue}</b> and <b>{maxValue}</b> with an
-                    average of <b> {avgValue}</b>.
-                  </p>
+                      <p>
+                        The values range between <b>{minValue}</b> and <b>{maxValue}</b> with an
+                        average of <b>{avgValue}</b>.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p>
+                        This chart compares <b>{yAxis}</b> values across the selected view.
+                      </p>
+
+                      <p>
+                        The values range between <b>{minValue}</b> and <b>{maxValue}</b> with an
+                        average of <b>{avgValue}</b>.
+                      </p>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -2140,15 +2331,59 @@ function Dashboard() {
                   <h4>Machine Health Score</h4>
 
                   <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-                    <select
-                      value={selectedHealthShift}
-                      onChange={(e) => setSelectedHealthShift(e.target.value)}
+                    <div
+                      ref={healthShiftDropdownRef}
+                      className="machine-dropdown section-filter-dropdown"
                     >
-                      <option value="ALL">All Shifts</option>
-                      <option value="E">Shift E</option>
-                      <option value="L">Shift L</option>
-                      <option value="N">Shift N</option>
-                    </select>
+                      <button
+                        type="button"
+                        className="machine-dropdown-button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsHealthShiftDropdownOpen((prev) => !prev);
+                        }}
+                      >
+                        {getSelectionLabel(
+                          selectedHealthShifts,
+                          healthShiftOptions,
+                          "All Shifts",
+                          "Shifts"
+                        )}
+                      </button>
+
+                      {isHealthShiftDropdownOpen && (
+                        <div className="machine-dropdown-menu" onMouseDown={(e) => e.stopPropagation()}>
+                          <label className="machine-option machine-option-all">
+                            <input
+                              type="checkbox"
+                              checked={
+                                healthShiftOptions.length > 0 &&
+                                selectedHealthShifts.length === healthShiftOptions.length
+                              }
+                              onChange={() =>
+                                handleAllMultiToggle(
+                                  healthShiftOptions,
+                                  selectedHealthShifts,
+                                  setSelectedHealthShifts
+                                )
+                              }
+                            />
+                            All Shifts
+                          </label>
+
+                          {healthShiftOptions.map((shift) => (
+                            <label key={shift} className="machine-option">
+                              <input
+                                type="checkbox"
+                                checked={selectedHealthShifts.includes(shift)}
+                                onChange={() => handleMultiToggle(shift, setSelectedHealthShifts)}
+                              />
+                              Shift {shift}
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
 
                     <button
                       onClick={() => downloadChartFromRef(healthChartRef, "health_score_chart")}
@@ -2194,18 +2429,18 @@ function Dashboard() {
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="machine" />
                       <YAxis domain={[0, 100]} />
-                      <Tooltip content={<CustomTooltip />} cursor={{ stroke: "#999" }} />
+                      <Tooltip content={<HealthTooltip />} 
+                       cursor={{ stroke: "#999" }} 
+                       />
                       <Legend />
 
-                      {(selectedHealthShift === "ALL" || selectedHealthShift === "E") && (
+                      {activeHealthShifts.includes("E") && (
                         <Bar dataKey="E" name="Shift E" fill={SHIFT_COLORS.E} />
                       )}
-
-                      {(selectedHealthShift === "ALL" || selectedHealthShift === "L") && (
+                      {activeHealthShifts.includes("L") && (
                         <Bar dataKey="L" name="Shift L" fill={SHIFT_COLORS.L} />
                       )}
-
-                      {(selectedHealthShift === "ALL" || selectedHealthShift === "N") && (
+                      {activeHealthShifts.includes("N") && (
                         <Bar dataKey="N" name="Shift N" fill={SHIFT_COLORS.N} />
                       )}
                     </BarChart>
@@ -2227,31 +2462,87 @@ function Dashboard() {
                 >
                   <h4>Failure Classification</h4>
 
-                  <button
-                    onClick={() =>
-                      downloadChartFromRef(failureChartRef, "failure_classification_chart")
-                    }
-                    disabled={failureTop.length === 0}
-                  >
-                    Download Failure Graph
-                  </button>
+                  <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                    <div
+                      ref={failureShiftDropdownRef}
+                      className="machine-dropdown section-filter-dropdown"
+                    >
+                      <button
+                        type="button"
+                        className="machine-dropdown-button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsFailureShiftDropdownOpen((prev) => !prev);
+                        }}
+                      >
+                        {getSelectionLabel(
+                          selectedFailureShifts,
+                          failureShiftOptions,
+                          "All Shifts",
+                          "Shifts"
+                        )}
+                      </button>
+
+                      {isFailureShiftDropdownOpen && (
+                        <div className="machine-dropdown-menu" onMouseDown={(e) => e.stopPropagation()}>
+                          <label className="machine-option machine-option-all">
+                            <input
+                              type="checkbox"
+                              checked={
+                                failureShiftOptions.length > 0 &&
+                                selectedFailureShifts.length === failureShiftOptions.length
+                              }
+                              onChange={() =>
+                                handleAllMultiToggle(
+                                  failureShiftOptions,
+                                  selectedFailureShifts,
+                                  setSelectedFailureShifts
+                                )
+                              }
+                            />
+                            All Shifts
+                          </label>
+
+                          {failureShiftOptions.map((shift) => (
+                            <label key={shift} className="machine-option">
+                              <input
+                                type="checkbox"
+                                checked={selectedFailureShifts.includes(shift)}
+                                onChange={() => handleMultiToggle(shift, setSelectedFailureShifts)}
+                              />
+                              Shift {shift}
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <button
+                      onClick={() =>
+                        downloadChartFromRef(failureChartRef, "failure_classification_chart")
+                      }
+                      disabled={failureTop.length === 0}
+                    >
+                      Download Failure Graph
+                    </button>
+                  </div>
                 </div>
 
-                {failureData?.summary?.top_risk_machine && (
+                {failureSummary.top_risk_machine && (
                   <div className="stats-row">
                     <div className="stat-card">
                       <span>Top Risk Machine</span>
-                      <strong>{getFailureLabel(failureData.summary.top_risk_machine)}</strong>
+                      <strong>{getFailureLabel(failureSummary.top_risk_machine)}</strong>
                     </div>
 
                     <div className="stat-card">
                       <span>Failure Score</span>
-                      <strong>{failureData.summary.top_risk_machine.failure_score}</strong>
+                      <strong>{failureSummary.top_risk_machine.failure_score}</strong>
                     </div>
 
                     <div className="stat-card">
                       <span>Risk Class</span>
-                      <strong>{failureData.summary.top_risk_machine.failure_class}</strong>
+                      <strong>{failureSummary.top_risk_machine.failure_class}</strong>
                     </div>
                   </div>
                 )}
@@ -2262,7 +2553,8 @@ function Dashboard() {
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="label" />
                       <YAxis domain={[0, 100]} />
-                      <Tooltip content={<CustomTooltip />} cursor={{ stroke: "#999" }} />
+                      <Tooltip content={<FailureTooltip />}
+                       cursor={{ stroke: "#999" }} />
                       <Bar dataKey="failure_score" name="Failure Score">
                         {failureTop.map((row, index) => (
                           <Cell
@@ -2271,8 +2563,8 @@ function Dashboard() {
                               row.failure_class === "High"
                                 ? "#DC2626"
                                 : row.failure_class === "Medium"
-                                ? "#F59E0B"
-                                : "#22C55E"
+                                  ? "#F59E0B"
+                                  : "#22C55E"
                             }
                           />
                         ))}

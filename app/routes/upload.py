@@ -1,24 +1,24 @@
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query
+from uuid import UUID, uuid4
+import math
+import os
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-import os
-import pandas as pd
-import math
-from uuid import UUID, uuid4
 
+from app.core.security import get_current_user
 from app.database import get_db
-from app.models.uploaded_file import UploadedFile
-from app.models.user import User
 from app.models.analysis_result import AnalysisResult
 from app.models.insight import Insight
-from app.core.security import get_current_user
+from app.models.uploaded_file import UploadedFile
+from app.models.user import User
 from app.services.analyzer import (
     analyze_dataset,
     analyze_excel,
-    save_insights,
+    detect_anomalies,
     get_excel_sheets,
     load_dataset_frame,
-    detect_anomalies,
+    save_insights,
 )
 
 router = APIRouter(prefix="/files", tags=["Files"])
@@ -27,16 +27,12 @@ UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
-# =========================
-# UPLOAD FILE
-# =========================
 @router.post("/upload")
 def upload_file(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-
     unique_filename = f"{uuid4()}_{file.filename}"
     file_path = os.path.join(UPLOAD_DIR, unique_filename)
 
@@ -51,7 +47,7 @@ def upload_file(
     db_file = UploadedFile(
         filename=file.filename,
         filepath=file_path,
-        user_id=current_user.id
+        user_id=current_user.id,
     )
 
     db.add(db_file)
@@ -60,7 +56,7 @@ def upload_file(
 
     analysis_entry = AnalysisResult(
         file_id=db_file.id,
-        result=analysis_result
+        result=analysis_result,
     )
 
     db.add(analysis_entry)
@@ -74,21 +70,17 @@ def upload_file(
 
     return {
         "message": "File uploaded and analyzed successfully",
-        "file_id": db_file.id
+        "file_id": db_file.id,
     }
 
 
-# =========================
-# LIST FILES
-# =========================
 @router.get("/my-files")
 def get_my_files(
     page: int = Query(1, ge=1),
     limit: int = Query(5, ge=1),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-
     offset = (page - 1) * limit
 
     total_files = db.query(UploadedFile).filter(
@@ -107,33 +99,30 @@ def get_my_files(
             {
                 "id": f.id,
                 "filename": f.filename,
-                "upload_time": f.upload_time
+                "upload_time": f.upload_time,
             }
             for f in files
-        ]
+        ],
     }
 
 
-# =========================
-# PREVIEW FILE (MULTI-SHEET SUPPORT)
-# =========================
 @router.get("/{file_id}/preview")
 def preview_file(
     file_id: UUID,
     sheet: str = Query(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     file = db.query(UploadedFile).filter(
         UploadedFile.id == file_id,
-        UploadedFile.user_id == current_user.id
+        UploadedFile.user_id == current_user.id,
     ).first()
 
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
 
     try:
-        df, sheets = load_dataset_frame(file.filepath, sheet)
+        df = load_dataset_frame(file.filepath, sheet)
         df = df.head(10)
 
         preview_data = df.to_dict(orient="records")
@@ -146,82 +135,73 @@ def preview_file(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    sheets = get_excel_sheets(file.filepath) if not file.filepath.endswith(".csv") else ["CSV Data"]
+
     return {
         "sheets": sheets,
-        "data": preview_data
+        "data": preview_data,
     }
 
-# =========================
-# GET SHEETS ONLY
-# =========================
+
 @router.get("/{file_id}/sheets")
 def get_sheets(
     file_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-
     file = db.query(UploadedFile).filter(
         UploadedFile.id == file_id,
-        UploadedFile.user_id == current_user.id
+        UploadedFile.user_id == current_user.id,
     ).first()
 
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
 
-    sheets = get_excel_sheets(file.filepath)
+    sheets = get_excel_sheets(file.filepath) if not file.filepath.endswith(".csv") else ["CSV Data"]
 
     return {
         "file_id": file_id,
-        "sheets": sheets
+        "sheets": sheets,
     }
 
-    
-#anomaly route
 
- @router.get("/{file_id}/anomaly")
+@router.get("/{file_id}/anomaly")
 def get_file_anomalies(
     file_id: UUID,
     parameter: str = Query(...),
     sheet: str = Query(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     file = db.query(UploadedFile).filter(
         UploadedFile.id == file_id,
-        UploadedFile.user_id == current_user.id
+        UploadedFile.user_id == current_user.id,
     ).first()
 
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
 
     try:
-        result = detect_anomalies(
+        return detect_anomalies(
             file_path=file.filepath,
             parameter=parameter,
-            sheet_name=sheet
+            sheet_name=sheet,
         )
-        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-   
 
 
-# =========================
-# DOWNLOAD FILE
-# =========================
 @router.get("/{file_id}/download")
 def download_file(
     file_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-
     file = db.query(UploadedFile).filter(
         UploadedFile.id == file_id,
-        UploadedFile.user_id == current_user.id
+        UploadedFile.user_id == current_user.id,
     ).first()
 
     if not file:
@@ -233,23 +213,19 @@ def download_file(
     return FileResponse(
         path=file.filepath,
         filename=file.filename,
-        media_type="application/octet-stream"
+        media_type="application/octet-stream",
     )
 
 
-# =========================
-# DELETE FILE
-# =========================
 @router.delete("/{file_id}")
 def delete_file(
     file_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-
     file = db.query(UploadedFile).filter(
         UploadedFile.id == file_id,
-        UploadedFile.user_id == current_user.id
+        UploadedFile.user_id == current_user.id,
     ).first()
 
     if not file:

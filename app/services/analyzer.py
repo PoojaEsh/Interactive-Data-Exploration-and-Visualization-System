@@ -8,6 +8,9 @@ from sklearn.linear_model import LinearRegression
 from app.models.insight import Insight
 
 
+SHIFT_ORDER = ["E", "L", "N"]
+
+
 def get_excel_sheets(file_path):
     excel_file = pd.ExcelFile(file_path)
     return excel_file.sheet_names
@@ -16,6 +19,7 @@ def get_excel_sheets(file_path):
 def detect_machine_column(columns):
     for col in columns:
         name = str(col).strip().lower()
+
         if (
             name == "mc"
             or name == "machine"
@@ -25,6 +29,7 @@ def detect_machine_column(columns):
             or "mc number" in name
         ):
             return col
+
     return columns[0] if columns else None
 
 
@@ -32,6 +37,23 @@ def detect_shift_column(columns):
     for col in columns:
         if "shift" in str(col).strip().lower():
             return col
+
+    return None
+
+
+def detect_log_date_column(columns):
+    for col in columns:
+        name = str(col).strip().lower()
+
+        if (
+            name == "log date"
+            or name == "logdate"
+            or "log date" in name
+            or "log time" in name
+            or "timestamp" in name
+        ):
+            return col
+
     return None
 
 
@@ -40,8 +62,10 @@ def normalize_shift(value):
 
     if "E" in shift:
         return "E"
+
     if "L" in shift:
         return "L"
+
     if "N" in shift:
         return "N"
 
@@ -52,6 +76,7 @@ def _safe_float(value, default=0.0):
     try:
         if pd.isna(value):
             return float(default)
+
         return float(value)
     except Exception:
         return float(default)
@@ -59,31 +84,45 @@ def _safe_float(value, default=0.0):
 
 def _machine_sort_key(value):
     text = str(value).strip()
+
     try:
         return (0, float(text))
     except Exception:
         return (1, text.lower())
 
 
+def _shift_sort_key(value):
+    shift = normalize_shift(value)
+
+    if shift in SHIFT_ORDER:
+        return SHIFT_ORDER.index(shift)
+
+    return 99
+
+
 def clean_dataframe(df: pd.DataFrame):
     report = {
         "missing_before": {},
         "filled_columns": {},
-        "outliers_capped": {}
+        "outliers_capped": {},
     }
 
     cleaned = df.copy()
     cleaned = cleaned.dropna(axis=1, how="all")
     cleaned.columns = [str(col).strip() for col in cleaned.columns]
-    cleaned = cleaned.loc[:, ~cleaned.columns.astype(str).str.contains("^Unnamed", na=False)]
+    cleaned = cleaned.loc[
+        :, ~cleaned.columns.astype(str).str.contains("^Unnamed", na=False)
+    ]
 
     for col in cleaned.columns:
         cleaned[col] = cleaned[col].replace(r"^\s*$", np.nan, regex=True)
         report["missing_before"][col] = int(cleaned[col].isna().sum())
 
     numeric_candidates = []
+
     for col in cleaned.columns:
         converted = pd.to_numeric(cleaned[col], errors="coerce")
+
         if converted.notna().sum() > 0:
             numeric_candidates.append(col)
 
@@ -92,6 +131,7 @@ def clean_dataframe(df: pd.DataFrame):
 
     for col in cleaned.columns:
         missing_count = int(cleaned[col].isna().sum())
+
         if missing_count == 0:
             continue
 
@@ -101,7 +141,7 @@ def clean_dataframe(df: pd.DataFrame):
             report["filled_columns"][col] = {
                 "method": "median",
                 "filled_count": missing_count,
-                "value_used": None if pd.isna(median_value) else float(median_value)
+                "value_used": None if pd.isna(median_value) else float(median_value),
             }
         else:
             mode_series = cleaned[col].mode(dropna=True)
@@ -110,7 +150,7 @@ def clean_dataframe(df: pd.DataFrame):
             report["filled_columns"][col] = {
                 "method": "mode",
                 "filled_count": missing_count,
-                "value_used": str(mode_value)
+                "value_used": str(mode_value),
             }
 
     for col in numeric_candidates:
@@ -129,11 +169,12 @@ def clean_dataframe(df: pd.DataFrame):
         cleaned[col] = series.clip(lower=lower, upper=upper)
 
         capped_count = int((before != cleaned[col]).sum())
+
         if capped_count > 0:
             report["outliers_capped"][col] = {
                 "count": capped_count,
                 "lower_bound": float(lower),
-                "upper_bound": float(upper)
+                "upper_bound": float(upper),
             }
 
     cleaned = cleaned.replace({np.nan: ""})
@@ -150,6 +191,7 @@ def load_dataset_frame(file_path, sheet_name=None):
         df = pd.read_excel(file_path, sheet_name=selected_sheet)
 
     cleaned_df, _ = clean_dataframe(df)
+
     return cleaned_df
 
 
@@ -169,6 +211,7 @@ def _get_machine_aggregate(file_path, sheet_name=None):
             continue
 
         converted = pd.to_numeric(df[col], errors="coerce")
+
         if converted.notna().sum() > 0:
             numeric_map[col] = converted
             numeric_columns.append(col)
@@ -200,14 +243,16 @@ def analyze_dataset(file_path):
     return {
         "rows": int(len(df)),
         "columns": int(len(df.columns)),
-        "column_names": df.columns.tolist()
+        "column_names": df.columns.tolist(),
     }
 
 
 def analyze_excel(file_path):
     df = load_dataset_frame(file_path)
+    numeric_columns = df.select_dtypes(
+        include=["int64", "float64", "int32", "float32"]
+    ).columns.tolist()
 
-    numeric_columns = df.select_dtypes(include=["int64", "float64", "int32", "float32"]).columns.tolist()
     insights = {}
 
     for col in numeric_columns:
@@ -215,7 +260,7 @@ def analyze_excel(file_path):
             "mean": _safe_float(df[col].mean()),
             "sum": _safe_float(df[col].sum()),
             "max": _safe_float(df[col].max()),
-            "min": _safe_float(df[col].min())
+            "min": _safe_float(df[col].min()),
         }
 
     return insights
@@ -232,8 +277,8 @@ def detect_anomalies(file_path, parameter, sheet_name=None):
             "summary": {
                 "total": 0,
                 "anomalies": 0,
-                "machines": []
-            }
+                "machines": [],
+            },
         }
 
     if parameter not in numeric_columns:
@@ -246,13 +291,16 @@ def detect_anomalies(file_path, parameter, sheet_name=None):
 
     if len(working_df) < 3:
         results = []
+
         for _, row in working_df.iterrows():
-            results.append({
-                "machine": str(row[machine_column]),
-                "value": _safe_float(row[parameter]),
-                "is_anomaly": False,
-                "score": 0.0
-            })
+            results.append(
+                {
+                    "machine": str(row[machine_column]),
+                    "value": _safe_float(row[parameter]),
+                    "is_anomaly": False,
+                    "score": 0.0,
+                }
+            )
 
         return {
             "machine_column": str(machine_column),
@@ -261,8 +309,8 @@ def detect_anomalies(file_path, parameter, sheet_name=None):
             "summary": {
                 "total": int(len(results)),
                 "anomalies": 0,
-                "machines": []
-            }
+                "machines": [],
+            },
         }
 
     contamination = min(0.2, max(0.05, 1 / len(working_df)))
@@ -282,12 +330,14 @@ def detect_anomalies(file_path, parameter, sheet_name=None):
         if is_anomaly:
             anomaly_machines.append(machine)
 
-        results.append({
-            "machine": machine,
-            "value": _safe_float(row[parameter]),
-            "is_anomaly": is_anomaly,
-            "score": _safe_float(scores[idx])
-        })
+        results.append(
+            {
+                "machine": machine,
+                "value": _safe_float(row[parameter]),
+                "is_anomaly": is_anomaly,
+                "score": _safe_float(scores[idx]),
+            }
+        )
 
     return {
         "machine_column": str(machine_column),
@@ -296,8 +346,8 @@ def detect_anomalies(file_path, parameter, sheet_name=None):
         "summary": {
             "total": int(len(results)),
             "anomalies": int(len(anomaly_machines)),
-            "machines": anomaly_machines
-        }
+            "machines": anomaly_machines,
+        },
     }
 
 
@@ -307,12 +357,13 @@ def compute_health_scores(file_path, sheet_name=None):
     if df.empty:
         return {
             "machine_column": None,
+            "shift_column": None,
             "results": [],
             "summary": {
                 "average_score": 0.0,
                 "best_machine": None,
-                "worst_machine": None
-            }
+                "worst_machine": None,
+            },
         }
 
     machine_column = detect_machine_column(df.columns.tolist())
@@ -324,12 +375,16 @@ def compute_health_scores(file_path, sheet_name=None):
     df[shift_column] = df[shift_column].apply(normalize_shift)
 
     numeric_columns = []
+
     for col in df.columns:
-        if col not in [machine_column, shift_column]:
-            converted = pd.to_numeric(df[col], errors="coerce")
-            if converted.notna().sum() > 0:
-                df[col] = converted
-                numeric_columns.append(col)
+        if col in [machine_column, shift_column]:
+            continue
+
+        converted = pd.to_numeric(df[col], errors="coerce")
+
+        if converted.notna().sum() > 0:
+            df[col] = converted
+            numeric_columns.append(col)
 
     if not numeric_columns:
         return {
@@ -339,8 +394,8 @@ def compute_health_scores(file_path, sheet_name=None):
             "summary": {
                 "average_score": 0.0,
                 "best_machine": None,
-                "worst_machine": None
-            }
+                "worst_machine": None,
+            },
         }
 
     grouped = (
@@ -350,12 +405,12 @@ def compute_health_scores(file_path, sheet_name=None):
     )
 
     values = grouped[numeric_columns].copy()
-
     means = values.mean()
     stds = values.std(ddof=0).replace(0, 1)
     z_scores = ((values - means) / stds).abs().clip(upper=4)
 
     anomaly_flags = np.zeros(len(grouped), dtype=int)
+
     if len(grouped) >= 3:
         contamination = min(0.2, max(0.05, 1 / len(grouped)))
         model = IsolationForest(contamination=contamination, random_state=42)
@@ -365,6 +420,7 @@ def compute_health_scores(file_path, sheet_name=None):
     health_scores = base_score.clip(lower=0, upper=100)
 
     results = []
+
     for index, row in grouped.iterrows():
         score = _safe_float(health_scores.iloc[index])
         machine = str(row[machine_column])
@@ -377,23 +433,29 @@ def compute_health_scores(file_path, sheet_name=None):
         else:
             label = "Critical"
 
-        results.append({
-            "machine": machine,
-            "shift": shift,
-            "display_label": f"Machine {machine} - Shift {shift}",
-            "score": round(score, 2),
-            "label": label,
-            "is_anomaly": bool(anomaly_flags[index])
-        })
+        results.append(
+            {
+                "machine": machine,
+                "shift": shift,
+                "display_label": f"Machine {machine} - Shift {shift}",
+                "score": round(score, 2),
+                "label": label,
+                "is_anomaly": bool(anomaly_flags[index]),
+            }
+        )
 
     results.sort(
         key=lambda item: (
             _machine_sort_key(item["machine"]),
-            ["E", "L", "N"].index(item["shift"]) if item["shift"] in ["E", "L", "N"] else 99
+            _shift_sort_key(item["shift"]),
         )
     )
 
-    average_score = round(sum(item["score"] for item in results) / len(results), 2) if results else 0.0
+    average_score = (
+        round(sum(item["score"] for item in results) / len(results), 2)
+        if results
+        else 0.0
+    )
     best_machine = max(results, key=lambda item: item["score"]) if results else None
     worst_machine = min(results, key=lambda item: item["score"]) if results else None
 
@@ -404,8 +466,8 @@ def compute_health_scores(file_path, sheet_name=None):
         "summary": {
             "average_score": average_score,
             "best_machine": best_machine,
-            "worst_machine": worst_machine
-        }
+            "worst_machine": worst_machine,
+        },
     }
 
 
@@ -421,21 +483,21 @@ def classify_failures(file_path, sheet_name=None):
                 "high_risk_count": 0,
                 "medium_risk_count": 0,
                 "low_risk_count": 0,
-                "top_risk_machine": None
-            }
+                "top_risk_machine": None,
+            },
         }
 
-    anomaly_columns = []
+    anomaly_hits = Counter()
+
     if numeric_columns:
         for col in numeric_columns[: min(3, len(numeric_columns))]:
-            anomaly_columns.append(detect_anomalies(file_path, col, sheet_name))
+            anomaly_result = detect_anomalies(file_path, col, sheet_name)
 
-    anomaly_hits = Counter()
-    for anomaly_result in anomaly_columns:
-        for machine in anomaly_result["summary"]["machines"]:
-            anomaly_hits[str(machine)] += 1
+            for machine in anomaly_result["summary"]["machines"]:
+                anomaly_hits[str(machine)] += 1
 
     results = []
+
     for item in health["results"]:
         machine = str(item["machine"])
         shift = normalize_shift(item.get("shift", "Unknown"))
@@ -451,13 +513,15 @@ def classify_failures(file_path, sheet_name=None):
         else:
             failure_class = "Low"
 
-        results.append({
-            "machine": machine,
-            "shift": shift,
-            "label": f"Machine {machine} - Shift {shift}",
-            "failure_score": failure_score,
-            "failure_class": failure_class
-        })
+        results.append(
+            {
+                "machine": machine,
+                "shift": shift,
+                "label": f"Machine {machine} - Shift {shift}",
+                "failure_score": failure_score,
+                "failure_class": failure_class,
+            }
+        )
 
     results.sort(key=lambda item: item["failure_score"], reverse=True)
 
@@ -465,13 +529,13 @@ def classify_failures(file_path, sheet_name=None):
         "high_risk_count": sum(1 for item in results if item["failure_class"] == "High"),
         "medium_risk_count": sum(1 for item in results if item["failure_class"] == "Medium"),
         "low_risk_count": sum(1 for item in results if item["failure_class"] == "Low"),
-        "top_risk_machine": results[0] if results else None
+        "top_risk_machine": results[0] if results else None,
     }
 
     return {
         "machine_column": str(machine_column),
         "results": results,
-        "summary": summary
+        "summary": summary,
     }
 
 
@@ -484,7 +548,7 @@ def suggest_chart(file_path, parameter=None, sheet_name=None):
         reason = "Bar charts work best for comparing a small number of machines."
     elif parameter and machine_count > 8:
         recommended = "line"
-        reason = "Line charts make large machine-by-machine comparisons easier to scan."
+        reason = "Line charts make large comparisons easier to scan."
     elif len(numeric_columns) >= 3:
         recommended = "radar"
         reason = "Radar charts are useful for multi-parameter machine comparison."
@@ -495,7 +559,7 @@ def suggest_chart(file_path, parameter=None, sheet_name=None):
     return {
         "recommended_chart": recommended,
         "reason": reason,
-        "available": ["bar", "line", "pie", "scatter", "area", "composed", "radar"]
+        "available": ["bar", "line", "pie", "scatter", "area", "composed", "radar"],
     }
 
 
@@ -509,7 +573,7 @@ def forecast_parameter(file_path, parameter, sheet_name=None, horizon=3):
             "points": [],
             "predicted_next": None,
             "trend": "flat",
-            "note": "Forecasting uses a simple sequence-based heuristic."
+            "note": "Forecasting uses a simple sequence-based heuristic.",
         }
 
     work_df = aggregated[[machine_column, parameter]].dropna(subset=[parameter]).copy()
@@ -521,12 +585,12 @@ def forecast_parameter(file_path, parameter, sheet_name=None, horizon=3):
             "points": [],
             "predicted_next": None,
             "trend": "flat",
-            "note": "Forecasting uses a simple sequence-based heuristic."
+            "note": "Forecasting uses a simple sequence-based heuristic.",
         }
 
     work_df = work_df.sort_values(
         by=machine_column,
-        key=lambda series: series.map(_machine_sort_key)
+        key=lambda series: series.map(_machine_sort_key),
     ).reset_index(drop=True)
 
     x_values = np.arange(len(work_df)).reshape(-1, 1)
@@ -536,26 +600,33 @@ def forecast_parameter(file_path, parameter, sheet_name=None, horizon=3):
     model.fit(x_values, y_values)
 
     points = []
+
     for idx, row in work_df.iterrows():
         predicted = _safe_float(model.predict([[idx]])[0])
-        points.append({
-            "label": str(row[machine_column]),
-            "actual": _safe_float(row[parameter]),
-            "predicted": predicted,
-            "is_forecast": False
-        })
+
+        points.append(
+            {
+                "label": str(row[machine_column]),
+                "actual": _safe_float(row[parameter]),
+                "predicted": predicted,
+                "is_forecast": False,
+            }
+        )
 
     future_points = []
+
     for step in range(1, int(horizon) + 1):
         future_index = len(work_df) + step - 1
         predicted = _safe_float(model.predict([[future_index]])[0])
-        label = f"Forecast {step}"
-        future_points.append({
-            "label": label,
-            "actual": None,
-            "predicted": predicted,
-            "is_forecast": True
-        })
+
+        future_points.append(
+            {
+                "label": f"Forecast {step}",
+                "actual": None,
+                "predicted": predicted,
+                "is_forecast": True,
+            }
+        )
 
     slope = _safe_float(model.coef_[0])
     trend = "upward" if slope > 0.01 else "downward" if slope < -0.01 else "flat"
@@ -566,7 +637,7 @@ def forecast_parameter(file_path, parameter, sheet_name=None, horizon=3):
         "points": points + future_points,
         "predicted_next": future_points[0]["predicted"] if future_points else None,
         "trend": trend,
-        "note": "Forecasting uses a simple sequence-based heuristic based on machine order."
+        "note": "Forecasting uses a simple sequence-based heuristic based on machine order.",
     }
 
 
@@ -576,11 +647,12 @@ def generate_ai_summary(file_path, parameter=None, sheet_name=None):
     if aggregated.empty or not numeric_columns:
         return {
             "summary": [
-                "No machine-level numeric data was available for AI insights."
+                "No machine-level numeric data was available for AI insights.",
             ]
         }
 
     selected_parameter = parameter if parameter in numeric_columns else numeric_columns[0]
+
     anomalies = detect_anomalies(file_path, selected_parameter, sheet_name)
     health = compute_health_scores(file_path, sheet_name)
     failures = classify_failures(file_path, sheet_name)
@@ -591,6 +663,7 @@ def generate_ai_summary(file_path, parameter=None, sheet_name=None):
     if health["summary"]["best_machine"] and health["summary"]["worst_machine"]:
         best_machine = health["summary"]["best_machine"]
         worst_machine = health["summary"]["worst_machine"]
+
         lines.append(
             f"Machine {best_machine['machine']} in shift {best_machine['shift']} has the strongest health score at {best_machine['score']}, while machine {worst_machine['machine']} in shift {worst_machine['shift']} is the weakest at {worst_machine['score']}."
         )
@@ -615,9 +688,7 @@ def generate_ai_summary(file_path, parameter=None, sheet_name=None):
         f"The recommended chart for the current view is {suggestion['recommended_chart']}, because {suggestion['reason'].lower()}"
     )
 
-    return {
-        "summary": lines
-    }
+    return {"summary": lines}
 
 
 def save_insights(db, file_id, insights):
@@ -625,7 +696,7 @@ def save_insights(db, file_id, insights):
         insight = Insight(
             file_id=file_id,
             column_name=column,
-            stats=stats
+            stats=stats,
         )
         db.add(insight)
 
