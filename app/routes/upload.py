@@ -12,7 +12,14 @@ from app.models.user import User
 from app.models.analysis_result import AnalysisResult
 from app.models.insight import Insight
 from app.core.security import get_current_user
-from app.services.analyzer import analyze_dataset, analyze_excel, save_insights, get_excel_sheets
+from app.services.analyzer import (
+    analyze_dataset,
+    analyze_excel,
+    save_insights,
+    get_excel_sheets,
+    load_dataset_frame,
+    detect_anomalies,
+)
 
 router = APIRouter(prefix="/files", tags=["Files"])
 
@@ -117,7 +124,6 @@ def preview_file(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-
     file = db.query(UploadedFile).filter(
         UploadedFile.id == file_id,
         UploadedFile.user_id == current_user.id
@@ -127,51 +133,7 @@ def preview_file(
         raise HTTPException(status_code=404, detail="File not found")
 
     try:
-
-        # CSV FILE
-        if file.filepath.endswith(".csv"):
-
-            df = pd.read_csv(file.filepath)
-            sheets = []
-
-        # EXCEL FILE
-        else:
-
-            excel = pd.ExcelFile(file.filepath)
-            sheets = excel.sheet_names
-
-            selected_sheet = sheet if sheet and sheet in sheets else sheets[0]
-
-            # Read without header first
-            df = pd.read_excel(file.filepath, sheet_name=selected_sheet, header=None)
-
-            # =========================
-            # Detect actual header row
-            # =========================
-            header_row = None
-
-            for i, row in df.iterrows():
-                if row.notna().sum() >= 3:
-                    header_row = i
-                    break
-
-            if header_row is not None:
-                df.columns = df.iloc[header_row]
-                df = df[(header_row + 1):]
-
-            # =========================
-            # CLEAN DATA
-            # =========================
-
-            df = df.dropna(axis=1, how="all")
-
-            df = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed")]
-
-            df.columns = [str(col).strip() for col in df.columns]
-
-            df = df.where(pd.notnull(df), None)
-
-        # Preview first 10 rows
+        df, sheets = load_dataset_frame(file.filepath, sheet)
         df = df.head(10)
 
         preview_data = df.to_dict(orient="records")
@@ -188,7 +150,6 @@ def preview_file(
         "sheets": sheets,
         "data": preview_data
     }
-
 
 # =========================
 # GET SHEETS ONLY
@@ -214,6 +175,38 @@ def get_sheets(
         "file_id": file_id,
         "sheets": sheets
     }
+
+    
+#anomaly route
+
+ @router.get("/{file_id}/anomaly")
+def get_file_anomalies(
+    file_id: UUID,
+    parameter: str = Query(...),
+    sheet: str = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    file = db.query(UploadedFile).filter(
+        UploadedFile.id == file_id,
+        UploadedFile.user_id == current_user.id
+    ).first()
+
+    if not file:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        result = detect_anomalies(
+            file_path=file.filepath,
+            parameter=parameter,
+            sheet_name=sheet
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+   
 
 
 # =========================

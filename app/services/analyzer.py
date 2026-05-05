@@ -28,6 +28,26 @@ def detect_machine_column(columns):
     return columns[0] if columns else None
 
 
+def detect_shift_column(columns):
+    for col in columns:
+        if "shift" in str(col).strip().lower():
+            return col
+    return None
+
+
+def normalize_shift(value):
+    shift = str(value).strip().upper()
+
+    if "E" in shift:
+        return "E"
+    if "L" in shift:
+        return "L"
+    if "N" in shift:
+        return "N"
+
+    return shift or "Unknown"
+
+
 def _safe_float(value, default=0.0):
     try:
         if pd.isna(value):
@@ -53,7 +73,6 @@ def clean_dataframe(df: pd.DataFrame):
     }
 
     cleaned = df.copy()
-
     cleaned = cleaned.dropna(axis=1, how="all")
     cleaned.columns = [str(col).strip() for col in cleaned.columns]
     cleaned = cleaned.loc[:, ~cleaned.columns.astype(str).str.contains("^Unnamed", na=False)]
@@ -283,11 +302,11 @@ def detect_anomalies(file_path, parameter, sheet_name=None):
 
 
 def compute_health_scores(file_path, sheet_name=None):
-    aggregated, machine_column, numeric_columns = _get_machine_aggregate(file_path, sheet_name)
+    df = load_dataset_frame(file_path, sheet_name)
 
-    if aggregated.empty or not numeric_columns:
+    if df.empty:
         return {
-            "machine_column": machine_column,
+            "machine_column": None,
             "results": [],
             "summary": {
                 "average_score": 0.0,
@@ -296,14 +315,49 @@ def compute_health_scores(file_path, sheet_name=None):
             }
         }
 
-    values = aggregated[numeric_columns].copy()
+    machine_column = detect_machine_column(df.columns.tolist())
+    shift_column = detect_shift_column(df.columns.tolist())
+
+    if not shift_column:
+        raise ValueError("Shift column not found in dataset")
+
+    df[shift_column] = df[shift_column].apply(normalize_shift)
+
+    numeric_columns = []
+    for col in df.columns:
+        if col not in [machine_column, shift_column]:
+            converted = pd.to_numeric(df[col], errors="coerce")
+            if converted.notna().sum() > 0:
+                df[col] = converted
+                numeric_columns.append(col)
+
+    if not numeric_columns:
+        return {
+            "machine_column": machine_column,
+            "shift_column": shift_column,
+            "results": [],
+            "summary": {
+                "average_score": 0.0,
+                "best_machine": None,
+                "worst_machine": None
+            }
+        }
+
+    grouped = (
+        df.groupby([machine_column, shift_column])[numeric_columns]
+        .mean()
+        .reset_index()
+    )
+
+    values = grouped[numeric_columns].copy()
+
     means = values.mean()
     stds = values.std(ddof=0).replace(0, 1)
     z_scores = ((values - means) / stds).abs().clip(upper=4)
 
-    anomaly_flags = np.zeros(len(aggregated), dtype=int)
-    if len(aggregated) >= 3 and len(numeric_columns) >= 1:
-        contamination = min(0.2, max(0.05, 1 / len(aggregated)))
+    anomaly_flags = np.zeros(len(grouped), dtype=int)
+    if len(grouped) >= 3:
+        contamination = min(0.2, max(0.05, 1 / len(grouped)))
         model = IsolationForest(contamination=contamination, random_state=42)
         anomaly_flags = (model.fit_predict(values) == -1).astype(int)
 
@@ -311,8 +365,11 @@ def compute_health_scores(file_path, sheet_name=None):
     health_scores = base_score.clip(lower=0, upper=100)
 
     results = []
-    for index, row in aggregated.iterrows():
+    for index, row in grouped.iterrows():
         score = _safe_float(health_scores.iloc[index])
+        machine = str(row[machine_column])
+        shift = normalize_shift(row[shift_column])
+
         if score >= 75:
             label = "Healthy"
         elif score >= 50:
@@ -321,11 +378,20 @@ def compute_health_scores(file_path, sheet_name=None):
             label = "Critical"
 
         results.append({
-            "machine": str(row[machine_column]),
+            "machine": machine,
+            "shift": shift,
+            "display_label": f"Machine {machine} - Shift {shift}",
             "score": round(score, 2),
             "label": label,
             "is_anomaly": bool(anomaly_flags[index])
         })
+
+    results.sort(
+        key=lambda item: (
+            _machine_sort_key(item["machine"]),
+            ["E", "L", "N"].index(item["shift"]) if item["shift"] in ["E", "L", "N"] else 99
+        )
+    )
 
     average_score = round(sum(item["score"] for item in results) / len(results), 2) if results else 0.0
     best_machine = max(results, key=lambda item: item["score"]) if results else None
@@ -333,6 +399,7 @@ def compute_health_scores(file_path, sheet_name=None):
 
     return {
         "machine_column": str(machine_column),
+        "shift_column": str(shift_column),
         "results": results,
         "summary": {
             "average_score": average_score,
@@ -346,7 +413,7 @@ def classify_failures(file_path, sheet_name=None):
     health = compute_health_scores(file_path, sheet_name)
     aggregated, machine_column, numeric_columns = _get_machine_aggregate(file_path, sheet_name)
 
-    if aggregated.empty or not numeric_columns:
+    if not health.get("results"):
         return {
             "machine_column": machine_column,
             "results": [],
@@ -359,8 +426,9 @@ def classify_failures(file_path, sheet_name=None):
         }
 
     anomaly_columns = []
-    for col in numeric_columns[: min(3, len(numeric_columns))]:
-        anomaly_columns.append(detect_anomalies(file_path, col, sheet_name))
+    if numeric_columns:
+        for col in numeric_columns[: min(3, len(numeric_columns))]:
+            anomaly_columns.append(detect_anomalies(file_path, col, sheet_name))
 
     anomaly_hits = Counter()
     for anomaly_result in anomaly_columns:
@@ -369,7 +437,9 @@ def classify_failures(file_path, sheet_name=None):
 
     results = []
     for item in health["results"]:
-        machine = item["machine"]
+        machine = str(item["machine"])
+        shift = normalize_shift(item.get("shift", "Unknown"))
+
         score_penalty = 100 - item["score"]
         anomaly_penalty = anomaly_hits[machine] * 15
         failure_score = max(0, min(100, round(score_penalty + anomaly_penalty, 2)))
@@ -383,6 +453,8 @@ def classify_failures(file_path, sheet_name=None):
 
         results.append({
             "machine": machine,
+            "shift": shift,
+            "label": f"Machine {machine} - Shift {shift}",
             "failure_score": failure_score,
             "failure_class": failure_class
         })
@@ -520,7 +592,7 @@ def generate_ai_summary(file_path, parameter=None, sheet_name=None):
         best_machine = health["summary"]["best_machine"]
         worst_machine = health["summary"]["worst_machine"]
         lines.append(
-            f"Machine {best_machine['machine']} has the strongest overall health score at {best_machine['score']}, while machine {worst_machine['machine']} is the weakest at {worst_machine['score']}."
+            f"Machine {best_machine['machine']} in shift {best_machine['shift']} has the strongest health score at {best_machine['score']}, while machine {worst_machine['machine']} in shift {worst_machine['shift']} is the weakest at {worst_machine['score']}."
         )
 
     if anomalies["summary"]["anomalies"] > 0:
@@ -536,7 +608,7 @@ def generate_ai_summary(file_path, parameter=None, sheet_name=None):
     if failures["summary"]["top_risk_machine"]:
         top_machine = failures["summary"]["top_risk_machine"]
         lines.append(
-            f"Machine {top_machine['machine']} has the highest failure score at {top_machine['failure_score']} and is classified as {top_machine['failure_class']} risk."
+            f"Machine {top_machine['machine']} in shift {top_machine['shift']} has the highest failure score at {top_machine['failure_score']} and is classified as {top_machine['failure_class']} risk."
         )
 
     lines.append(
