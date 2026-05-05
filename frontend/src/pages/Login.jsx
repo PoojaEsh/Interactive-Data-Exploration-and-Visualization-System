@@ -15,7 +15,41 @@ function Login() {
     const pattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     return pattern.test(value);
   };
+const handleRegister = async () => {
+  if (!validateEmail(email)) {
+    setError("Enter valid email");
+    return;
+  }
 
+  if (password.length < 6) {
+    setError("Password must be at least 6 characters");
+    return;
+  }
+
+  try {
+    const response = await fetch("http://localhost:8000/auth/register", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        email: email,
+        password: password
+      })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      setError(data.detail || "Registration failed");
+      return;
+    }
+
+    alert("Registered successfully! Now login.");
+  } catch {
+    setError("Server error during registration");
+  }
+};
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
