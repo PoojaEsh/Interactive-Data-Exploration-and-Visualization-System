@@ -1,6 +1,7 @@
 import "./Dashboard.css";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
+import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
 import {
   Area,
@@ -334,7 +335,7 @@ const aggregateByShift = (rows, shiftKey, valueKey) => {
   }));
 };
 
-const aggregateShiftHourlySeries = (
+const aggregateMachineShiftHourlySeries = (
   rows,
   shiftKey,
   machineKey,
@@ -344,9 +345,6 @@ const aggregateShiftHourlySeries = (
   selectedMachines
 ) => {
   const grouped = {};
-
-  selectedShiftKeys = selectedShiftKeys || [];
-  selectedMachines = selectedMachines || [];
 
   rows.forEach((row) => {
     const shift = normalizeShift(row[shiftKey]);
@@ -359,41 +357,32 @@ const aggregateShiftHourlySeries = (
       !selectedMachines.includes(machine) ||
       !hour ||
       Number.isNaN(value)
-    ) return;
-
-    // ✅ GROUP BY HOUR ONLY
-    if (!grouped[hour]) {
-      grouped[hour] = {
-        hour,
-        machines: new Set()
-      };
-
-      selectedShiftKeys.forEach((s) => {
-        grouped[hour][s] = null;
-        grouped[hour][`${s}_total`] = 0;
-        grouped[hour][`${s}_count`] = 0;
-      });
+    ) {
+      return;
     }
 
-    // ✅ track machines
-    grouped[hour].machines.add(machine);
+    // ✅ SHIFT + HOUR SECTION
+    const xLabel = `${shift}-${hour}`;
 
-    // ✅ aggregate shift values
-    grouped[hour][`${shift}_total`] += value;
-    grouped[hour][`${shift}_count`] += 1;
+    // ✅ CREATE GROUP
+    if (!grouped[xLabel]) {
+      grouped[xLabel] = {
+        label: xLabel,
+        shift,
+        hour
+      };
+    }
 
-    grouped[hour][shift] =
-      grouped[hour][`${shift}_total`] /
-      grouped[hour][`${shift}_count`];
+    // ✅ EACH MACHINE GETS ITS OWN LINE
+    grouped[xLabel][machine] = value;
   });
 
-  return Object.values(grouped)
-    .map((d) => ({
-      ...d,
-      machines: [...d.machines] // convert Set → array
-    }))
-    .sort((a, b) => a.hour.localeCompare(b.hour));
+  // ✅ SORT BY LABEL
+  return Object.values(grouped).sort((a, b) =>
+    a.label.localeCompare(b.label)
+  );
 };
+
 const transformHealthData = (data) => {
   if (!data || !Array.isArray(data.results)) return [];
 
@@ -499,7 +488,6 @@ function Dashboard() {
   const [forecastData, setForecastData] = useState(null);
   const [chartSuggestion, setChartSuggestion] = useState(null);
 
-  const [isDetectingAnomalies, setIsDetectingAnomalies] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isLoadingInsights, setIsLoadingInsights] = useState(false);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
@@ -1051,20 +1039,15 @@ const combinedShiftLineData = useMemo(() => {
     return [];
   }
 
-  const result = aggregateShiftHourlySeries(
+  return aggregateMachineShiftHourlySeries(
     filteredData,
     shiftColumn,
     machineColumn,
     logDateColumn,
     yAxis,
     activeShiftKeys,
-    selectedMachines   // ✅ IMPORTANT (you missed this earlier)
+    selectedMachines
   );
-
-  // ✅ NOW LOG WORKS
-  console.log("Line Data:", result);
-
-  return result;
 }, [
   filteredData,
   shiftColumn,
@@ -1072,9 +1055,57 @@ const combinedShiftLineData = useMemo(() => {
   logDateColumn,
   yAxis,
   activeShiftKeys,
-  selectedMachines,   // ✅ add this also
+  selectedMachines,
   isYAxisNumeric,
   chartType
+]);
+const averageShiftLineData = useMemo(() => {
+  const grouped = {};
+
+  filteredData.forEach((row) => {
+    const shift = normalizeShift(row[shiftColumn]);
+    const machine = String(row[machineColumn] || "").trim();
+    const hour = getHourBucket(row[logDateColumn]);
+    const value = Number(row[yAxis]);
+
+    if (
+      !activeShiftKeys.includes(shift) ||
+      !selectedMachines.includes(machine) ||
+      !hour ||
+      Number.isNaN(value)
+    ) {
+      return;
+    }
+
+    const key = `${shift}-${hour}`;
+
+    if (!grouped[key]) {
+      grouped[key] = {
+        label: key,
+        total: 0,
+        count: 0,
+        avg: 0
+      };
+    }
+
+    grouped[key].total += value;
+    grouped[key].count += 1;
+
+    grouped[key].avg =
+      grouped[key].total / grouped[key].count;
+  });
+
+  return Object.values(grouped).sort((a, b) =>
+    a.label.localeCompare(b.label)
+  );
+}, [
+  filteredData,
+  shiftColumn,
+  machineColumn,
+  logDateColumn,
+  yAxis,
+  activeShiftKeys,
+  selectedMachines
 ]);
 
   const useCombinedShiftLineChart =
@@ -1283,34 +1314,6 @@ const combinedShiftLineData = useMemo(() => {
           ? selectedMachines.join(", ")
           : `${selectedMachines.length} Machines Selected`;
 
-  const fetchAnomalies = async () => {
-    if (!currentDatasetId || !yAxis || !isYAxisNumeric) {
-      alert("Please select a numeric parameter for anomaly detection");
-      return;
-    }
-
-    setIsDetectingAnomalies(true);
-
-    try {
-      const data = await fetchApi(
-        `http://localhost:8000/datasets/${currentDatasetId}/anomaly?parameter=${encodeURIComponent(yAxis)}`,
-        "Failed to detect anomalies"
-      );
-
-      const nextMap = {};
-      data.results.forEach((item) => {
-        nextMap[String(item.machine).trim()] = Boolean(item.is_anomaly);
-      });
-
-      setAnomalyMap(nextMap);
-      setAnomalySummary(data.summary);
-    } catch {
-      setAnomalyMap({});
-      setAnomalySummary(null);
-    } finally {
-      setIsDetectingAnomalies(false);
-    }
-  };
 
   const fetchHealthScores = async () => {
     if (!currentDatasetId) return;
@@ -1371,6 +1374,7 @@ const combinedShiftLineData = useMemo(() => {
         "Failed to load forecast",
         setForecastData
       );
+      console.log("Forecast Response:", forecastData);
     } finally {
       setIsLoadingInsights(false);
     }
@@ -1414,49 +1418,25 @@ const combinedShiftLineData = useMemo(() => {
     URL.revokeObjectURL(url);
   };
 
-  const getChartImageFromRef = async (ref) => {
-    const wrapper = ref.current;
-    if (!wrapper) return null;
+const getChartImageFromRef = async (ref) => {
+  const wrapper = ref.current;
 
-    const svg = wrapper.querySelector("svg");
-    if (!svg) return null;
+  if (!wrapper) return null;
 
-    const serializer = new XMLSerializer();
-    let source = serializer.serializeToString(svg);
+  // IMPORTANT WAIT
+  await new Promise((resolve) =>
+    setTimeout(resolve, 1000)
+  );
 
-    if (!source.includes('xmlns="http://www.w3.org/2000/svg"')) {
-      source = source.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"');
-    }
+  const canvas = await html2canvas(wrapper, {
+    scale: 2,
+    useCORS: true,
+    backgroundColor: "#ffffff",
+    logging: false
+  });
 
-    const svgBlob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
-    const url = URL.createObjectURL(svgBlob);
-
-    return new Promise((resolve) => {
-      const img = new Image();
-
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        canvas.width = img.width || 1200;
-        canvas.height = img.height || 700;
-
-        const ctx = canvas.getContext("2d");
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0);
-
-        const imageData = canvas.toDataURL("image/png");
-        URL.revokeObjectURL(url);
-        resolve(imageData);
-      };
-
-      img.onerror = () => {
-        URL.revokeObjectURL(url);
-        resolve(null);
-      };
-
-      img.src = url;
-    });
-  };
+  return canvas.toDataURL("image/png");
+};
 
   const addWrappedText = (pdf, text, x, y, maxWidth, lineHeight = 7) => {
     const lines = pdf.splitTextToSize(text, maxWidth);
@@ -1481,19 +1461,61 @@ const combinedShiftLineData = useMemo(() => {
     return y + 8;
   };
 
-  const addChartToPdf = (pdf, title, imageData, y, margin) => {
-    if (!imageData) return y;
+const addChartToPdf = (
+  pdf,
+  title,
+  image,
+  y,
+  margin
+) => {
 
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const usableWidth = pageWidth - margin * 2;
-    const chartHeight = 75;
+  if (!image) return y;
 
-    y = addSectionTitle(pdf, title, y, margin);
-    y = ensurePageSpace(pdf, y, chartHeight + 10, margin);
-    pdf.addImage(imageData, "PNG", margin, y, usableWidth, chartHeight);
+  const pageWidth =
+    pdf.internal.pageSize.getWidth();
 
-    return y + chartHeight + 10;
-  };
+  const contentWidth =
+    pageWidth - margin * 2;
+
+  y = ensurePageSpace(
+    pdf,
+    y,
+    90,
+    margin
+  );
+
+  pdf.setFont("helvetica", "bold");
+
+  pdf.setFontSize(16);
+
+  pdf.text(title, margin, y);
+
+  y += 6;
+
+  pdf.setDrawColor(220);
+
+  pdf.roundedRect(
+    margin - 2,
+    y - 2,
+    contentWidth + 4,
+    78,
+    4,
+    4
+  );
+
+  pdf.addImage(
+    image,
+    "PNG",
+    margin,
+    y + 4,
+    contentWidth,
+    65
+  );
+
+  y += 86;
+
+  return y;
+};
 
   const downloadPdfReport = async () => {
     if (!previewData.length) {
@@ -1517,10 +1539,25 @@ const combinedShiftLineData = useMemo(() => {
       const failureChartImage = await getChartImageFromRef(failureChartRef);
       const forecastChartImage = await getChartImageFromRef(forecastChartRef);
 
-      pdf.setFont("helvetica", "bold");
-      pdf.setFontSize(20);
-      pdf.text("Machine Analytics Report", margin, y);
-      y += 10;
+pdf.setFillColor(17, 24, 39);
+
+pdf.rect(0, 0, 210, 28, "F");
+
+pdf.setTextColor(255, 255, 255);
+
+pdf.setFont("helvetica", "bold");
+
+pdf.setFontSize(24);
+
+pdf.text(
+  "Machine Analytics Report",
+  margin,
+  18
+);
+
+pdf.setTextColor(0, 0, 0);
+
+y = 38;
 
       pdf.setDrawColor(180, 180, 180);
       pdf.line(margin, y, pageWidth - margin, y);
@@ -1536,6 +1573,49 @@ const combinedShiftLineData = useMemo(() => {
 
       pdf.text(`Selected Parameter: ${yAxis || "N/A"}`, margin, y);
       y += 12;
+      pdf.setFillColor(243, 244, 246);
+
+pdf.roundedRect(15, y, 40, 22, 3, 3, "F");
+pdf.roundedRect(60, y, 40, 22, 3, 3, "F");
+pdf.roundedRect(105, y, 40, 22, 3, 3, "F");
+pdf.roundedRect(150, y, 40, 22, 3, 3, "F");
+
+pdf.setFontSize(10);
+
+pdf.text("Avg Health", 20, y + 8);
+pdf.text(
+  String(
+    healthShiftSummary?.average_score || "N/A"
+  ),
+  20,
+  y + 16
+);
+
+pdf.text("Machines", 65, y + 8);
+pdf.text(
+  String(selectedMachines?.length || 0),
+  65,
+  y + 16
+);
+
+pdf.text("Anomalies", 110, y + 8);
+pdf.text(
+  String(anomalySummary?.anomalies || 0),
+  110,
+  y + 16
+);
+
+pdf.text("Top Risk", 155, y + 8);
+pdf.text(
+  String(
+    failureSummary?.top_risk_machine
+      ?.machine || "N/A"
+  ),
+  155,
+  y + 16
+);
+
+y += 32;
 
       y = addSectionTitle(pdf, "Report Overview", y, margin);
       y = addWrappedText(
@@ -1962,18 +2042,19 @@ const combinedShiftLineData = useMemo(() => {
 
               {chartType === "line" && (
                 <select value={lineViewMode} onChange={(e) => setLineViewMode(e.target.value)}>
-                  <option value="shiftCompare">Shift Time Compare</option>
-                  <option value="machine">Machine Wise</option>
-                  <option value="shiftSummary">Shift Summary</option>
+                 <option value="shift_compare">
+  Shift Time Compare
+</option>
+
+<option value="machine">
+  Machine Wise
+</option>
+
+
                 </select>
               )}
 
-              <button
-                onClick={fetchAnomalies}
-                disabled={!currentDatasetId || !yAxis || isDetectingAnomalies || !isYAxisNumeric}
-              >
-                {isDetectingAnomalies ? "Detecting..." : "Detect Anomalies"}
-              </button>
+
 
               <button
                 onClick={() =>
@@ -2027,6 +2108,32 @@ const combinedShiftLineData = useMemo(() => {
               >
                 Forecast
               </button>
+             <button
+  onClick={() =>
+    navigate("/charts-dashboard", {
+      state: {
+        chartType,
+        yAxis,
+        machineColumn,
+        machineChartData,
+        shiftChartData,
+        combinedShiftLineData,
+        averageShiftLineData,
+        radarData,
+        selectedMachines,
+        anomalyMap,
+        useCombinedShiftLineChart,
+        useShiftAxisChart,
+        isYAxisNumeric,
+        healthChartData,
+        failureTop,
+        forecastData
+      }
+    })
+  }
+>
+  Open Full Dashboard
+</button> 
             </div>
 
             {machineRunningMap.length > 0 && (
@@ -2044,12 +2151,12 @@ const combinedShiftLineData = useMemo(() => {
 
             <div className="chart-area" ref={mainChartRef}>
               {chartType === "bar" && isYAxisNumeric && useShiftAxisChart && shiftChartData.length > 0 && (
-                <ResponsiveContainer width="100%" height={360}>
+                <ResponsiveContainer width="99%" height={400}>
                   <BarChart data={shiftChartData}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="shift" />
                     <YAxis />
-                    <Tooltip content={<HealthTooltip />} />   ✅ cursor={{ stroke: "#999" }} />
+                  
                     <Bar dataKey={yAxis} fill="#6366F1" />
                   </BarChart>
                 </ResponsiveContainer>
@@ -2061,7 +2168,7 @@ const combinedShiftLineData = useMemo(() => {
                 isYAxisNumeric &&
                 !useShiftAxisChart &&
                 machineChartData.length > 0 && (
-                  <ResponsiveContainer width="100%" height={360}>
+                  <ResponsiveContainer width="99%" height={400}>
                     <BarChart data={machineChartData}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey={machineColumn} />
@@ -2084,57 +2191,150 @@ const combinedShiftLineData = useMemo(() => {
                   </ResponsiveContainer>
                 )}
 
-              {chartType === "line" && isYAxisNumeric && useCombinedShiftLineChart && (
-                <ResponsiveContainer width="100%" height={420}>
-                  <LineChart
-                    data={combinedShiftLineData}
-                    margin={{ top: 20, right: 20, left: 10, bottom: 20 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" />
-                    
-                    <ReferenceLine x="14:00" stroke="#999" strokeDasharray="3 3" />
-                    <ReferenceLine x="22:00" stroke="#999" strokeDasharray="3 3"/>
+{chartType === "line" && isYAxisNumeric && useCombinedShiftLineChart && (
+  <>
+    {/* ✅ MACHINE + SHIFT COMPARISON GRAPH */}
+    <ResponsiveContainer width="99%" height={450}>
+      <LineChart
+        data={combinedShiftLineData}
+        margin={{ top: 20, right: 20, left: 10, bottom: 20 }}
+      >
+        <CartesianGrid strokeDasharray="3 3" />
 
-                    <ReferenceArea x1="06:00" x2="14:00" lfill="#6366F1" fillOpacity={0.05} />
-                    <ReferenceArea x1="14:00" x2="22:00" label="#22C55E" fillOpacity={0.05} />
-                    <ReferenceArea x1="22:00" x2="24:00" label="#F59E0B" fillOpacity={0.05} />
-                    <XAxis dataKey="hour"
-                   />   
-                    <YAxis />
-                    <Tooltip content={<CustomTooltip />}/>
-                    <Legend />
+        {/* SHIFT DIVIDERS */}
+        <ReferenceLine
+          x="L-14:00"
+          stroke="#999"
+          strokeDasharray="3 3"
+        />
 
-                    <Line dataKey="E" name="Shift E" stroke="#6366F1" />
-                    <Line dataKey="L" name="Shift L" stroke="#22C55E" />
-                    <Line dataKey="N" name="Shift N" stroke="#F59E0B" />
-                      
-                  </LineChart>
-                </ResponsiveContainer>
-              )}
+        <ReferenceLine
+          x="N-22:00"
+          stroke="#999"
+          strokeDasharray="3 3"
+        />
 
-              {chartType === "line" &&
-                machineColumn &&
-                yAxis &&
-                isYAxisNumeric &&
-                !useCombinedShiftLineChart &&
-                machineChartData.length > 0 && (
-                  <ResponsiveContainer width="100%" height={360}>
-                    <LineChart data={machineChartData}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey={machineColumn} />
-                      <YAxis />
-                      <Tooltip content={<CustomTooltip />} cursor={{ stroke: "#999" }} />
-                      <Line type="monotone" dataKey={yAxis} stroke="#6366F1" strokeWidth={2} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                )}
+        <XAxis
+          dataKey="label"
+          angle={-45}
+          textAnchor="end"
+          height={70}
+        />
 
+        <YAxis />
+
+        <Tooltip content={<CustomTooltip />} />
+
+        <Legend />
+
+        {/* ✅ ONE LINE PER MACHINE */}
+        {selectedMachines.map((machine, index) => (
+          <Line
+            key={machine}
+            type="monotone"
+            dataKey={machine}
+            name={`Machine ${machine}`}
+            stroke={COLORS[index % COLORS.length]}
+            strokeWidth={2}
+            connectNulls
+            dot={false}
+            activeDot={{ r: 6 }}
+          />
+        ))}
+      </LineChart>
+    </ResponsiveContainer>
+
+    {/* ✅ SECOND GRAPH = AVERAGE TREND */}
+    <h3 style={{ marginTop: "40px" }}>
+      Average Shift Trend
+    </h3>
+
+    <ResponsiveContainer width="99%" height={400}>
+      <LineChart data={averageShiftLineData}>
+        <CartesianGrid strokeDasharray="3 3" />
+         {/* SHIFT AREAS */}
+
+<ReferenceArea
+  x1="E-06:00"
+  x2="E-14:00"
+  fill="#6366F1"
+  fillOpacity={0.05}
+/>
+
+<ReferenceArea
+  x1="L-14:00"
+  x2="L-22:00"
+  fill="#22C55E"
+  fillOpacity={0.05}
+/>
+
+<ReferenceArea
+  x1="N-22:00"
+  x2="N-23:00"
+  fill="#F59E0B"
+  fillOpacity={0.05}
+/>
+        <XAxis
+          dataKey="label"
+          angle={-45}
+          textAnchor="end"
+          height={70}
+        />
+
+        <YAxis />
+
+        <Tooltip />
+
+        <Legend />
+
+        <Line
+          type="monotone"
+          dataKey="avg"
+          name="Average Value"
+          stroke="#6366F1"
+          strokeWidth={3}
+          dot={false}
+        />
+      </LineChart>
+    </ResponsiveContainer>
+  </>
+)}
+
+{/* ✅ MACHINE WISE NORMAL LINE GRAPH */}
+{chartType === "line" &&
+  machineColumn &&
+  yAxis &&
+  isYAxisNumeric &&
+  !useCombinedShiftLineChart &&
+  machineChartData.length > 0 && (
+    <ResponsiveContainer width="99%" height={400}>
+      <LineChart data={machineChartData}>
+        <CartesianGrid strokeDasharray="3 3" />
+
+        <XAxis dataKey={machineColumn} />
+
+        <YAxis />
+
+        <Tooltip
+          content={<CustomTooltip />}
+          cursor={{ stroke: "#999" }}
+        />
+
+        <Line
+          type="monotone"
+          dataKey={yAxis}
+          stroke="#6366F1"
+          strokeWidth={2}
+        />
+      </LineChart>
+    </ResponsiveContainer>
+)}
               {chartType === "pie" &&
                 machineColumn &&
                 yAxis &&
                 isYAxisNumeric &&
                 machineChartData.length > 0 && (
-                  <ResponsiveContainer width="100%" height={360}>
+                  <ResponsiveContainer width="99%" height={400}>
                     <PieChart>
                       <Pie
                         data={machineChartData}
@@ -2165,7 +2365,7 @@ const combinedShiftLineData = useMemo(() => {
                 yAxis &&
                 isYAxisNumeric &&
                 machineChartData.length > 0 && (
-                  <ResponsiveContainer width="100%" height={360}>
+                  <ResponsiveContainer width="99%" height={400}>
                     <ScatterChart>
                       <CartesianGrid />
                       <XAxis dataKey={machineColumn} name={machineColumn} />
@@ -2181,7 +2381,7 @@ const combinedShiftLineData = useMemo(() => {
                 yAxis &&
                 isYAxisNumeric &&
                 machineChartData.length > 0 && (
-                  <ResponsiveContainer width="100%" height={360}>
+                  <ResponsiveContainer width="99%" height={400}>
                     <AreaChart data={machineChartData}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey={machineColumn} />
@@ -2197,7 +2397,7 @@ const combinedShiftLineData = useMemo(() => {
                 yAxis &&
                 isYAxisNumeric &&
                 machineChartData.length > 0 && (
-                  <ResponsiveContainer width="100%" height={360}>
+                  <ResponsiveContainer width="99%" height={400}>
                     <ComposedChart data={machineChartData}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey={machineColumn} />
@@ -2211,7 +2411,7 @@ const combinedShiftLineData = useMemo(() => {
                 )}
 
               {chartType === "radar" && radarData.length > 0 && (
-                <ResponsiveContainer width="100%" height={360}>
+                <ResponsiveContainer width="99%" height={400}>
                   <RadarChart data={radarData}>
                     <PolarGrid />
                     <PolarAngleAxis dataKey="parameter" />
@@ -2424,13 +2624,18 @@ const combinedShiftLineData = useMemo(() => {
                 </div>
 
                 <div className="chart-area" ref={healthChartRef}>
-                  <ResponsiveContainer width="100%" height={360}>
+                  <ResponsiveContainer width="99%" height={400}>
                     <BarChart data={healthChartData}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="machine" />
                       <YAxis domain={[0, 100]} />
                       <Tooltip content={<HealthTooltip />} 
-                       cursor={{ stroke: "#999" }} 
+                       cursor={{ stroke: "#999" }}
+                       style={{
+                       background: "#fff",
+                       padding: "20px",
+                       minHeight: "450px"
+                     }} 
                        />
                       <Legend />
 
@@ -2548,12 +2753,17 @@ const combinedShiftLineData = useMemo(() => {
                 )}
 
                 <div className="chart-area" ref={failureChartRef}>
-                  <ResponsiveContainer width="100%" height={360}>
+                  <ResponsiveContainer width="99%" height={400}>
                     <BarChart data={failureTop}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="label" />
                       <YAxis domain={[0, 100]} />
                       <Tooltip content={<FailureTooltip />}
+                      style={{
+                     background: "#fff",
+                     padding: "20px",
+                     minHeight: "450px"
+                  }}
                        cursor={{ stroke: "#999" }} />
                       <Bar dataKey="failure_score" name="Failure Score">
                         {failureTop.map((row, index) => (
@@ -2608,12 +2818,18 @@ const combinedShiftLineData = useMemo(() => {
                 </p>
 
                 <div className="chart-area" ref={forecastChartRef}>
-                  <ResponsiveContainer width="100%" height={320}>
+                  <ResponsiveContainer width="99%" height={320}>
                     <ComposedChart data={forecastData.points}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="label" />
                       <YAxis />
-                      <Tooltip content={<CustomTooltip />} cursor={{ stroke: "#999" }} />
+                      <Tooltip content={<CustomTooltip />} 
+                      style={{
+                     background: "#fff",
+                     padding: "20px",
+                     minHeight: "450px"
+                   }}
+                     cursor={{ stroke: "#999" }} />
                       <Legend />
                       <Bar dataKey="actual" fill="#93C5FD" name="Actual" />
                       <Line
