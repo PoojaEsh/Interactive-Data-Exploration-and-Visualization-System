@@ -1,6 +1,9 @@
 import "./Dashboard.css";
 
-import { useLocation } from "react-router-dom";
+import {
+  useLocation,
+  useNavigate
+} from "react-router-dom";
 import { useState } from "react";
 
 import {
@@ -68,9 +71,66 @@ const CustomTooltip = ({
   return null;
 };
 
+const ForecastTooltip = ({
+  active,
+  payload,
+  label
+}) => {
+
+  if (
+    active &&
+    payload &&
+    payload.length
+  ) {
+
+    return (
+
+      <div
+        style={{
+          background: "#ffffff",
+          padding: "12px",
+          border: "1px solid #E5E7EB",
+          borderRadius: "12px",
+          boxShadow:
+            "0 4px 14px rgba(0,0,0,0.08)"
+        }}
+      >
+
+        <p>
+          <b>Data Point:</b> {label}
+        </p>
+
+        {payload.map((entry, i) => (
+
+          <p
+            key={i}
+            style={{
+              color: entry.color
+            }}
+          >
+
+            <b>{entry.name}:</b>{" "}
+
+            {Number(
+              entry.value
+            ).toFixed(2)}
+
+          </p>
+
+        ))}
+
+      </div>
+
+    );
+  }
+
+  return null;
+};
+
 function ChartsDashboard() {
 
   const location = useLocation();
+  const navigate = useNavigate();
 
   const {
     yAxis,
@@ -217,7 +277,7 @@ function ChartsDashboard() {
         </button>
 
         <button
-          onClick={() => window.history.back()}
+          onClick={() => navigate(-1)}
           style={{
             marginTop: "auto",
             padding: "12px",
@@ -542,71 +602,125 @@ function ChartsDashboard() {
 
           {/* FORECAST */}
 
-          {visibleCharts.forecast &&
-            (
-              (
-                forecastData?.points &&
-                forecastData.points.length > 0
-              ) ||
-              (
-                Array.isArray(forecastData) &&
-                forecastData.length > 0
-              )
-            ) && (
+{/* FORECAST */}
 
-            <div style={chartStyle}>
+{visibleCharts.forecast &&
+  (
+    (
+      forecastData?.points &&
+      forecastData.points.length > 0
+    ) ||
+    (
+      Array.isArray(forecastData) &&
+      forecastData.length > 0
+    )
+  ) && (
 
-              <h3 style={headingStyle}>
-                Forecast Analysis
-              </h3>
+  <div style={chartStyle}>
 
-              <ResponsiveContainer
-                width="100%"
-                height={420}
-              >
+    <h3 style={headingStyle}>
+      Forecast Analysis
+    </h3>
 
-                <LineChart
-                  data={
-                    forecastData?.points ||
-                    forecastData
-                  }
-                >
+    <ResponsiveContainer
+      width="100%"
+      height={420}
+    >
 
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                  />
+      <LineChart
+        data={
+  (
+    forecastData?.points ||
+    forecastData ||
+    []
+  )
 
-                  <XAxis dataKey="index" />
+  .filter(
+    item =>
+      item !== null &&
+      item !== undefined
+  )
 
-                  <YAxis />
+  .map((item, index) => ({
 
-                  <Tooltip />
+    point: `P${index + 1}`,
 
-                  <Legend />
+    actual:
+      Number(
+        item.actual ??
+        item.actual_value ??
+        item.value ??
+        0
+      ),
 
-                  <Line
-                    type="monotone"
-                    dataKey="actual"
-                    stroke="#6366F1"
-                    strokeWidth={2.5}
-                    dot={false}
-                  />
+    forecast:
+      Number(
+        item.forecast ??
+        item.predicted ??
+        item.predicted_value ??
+        0
+      )
 
-                  <Line
-                    type="monotone"
-                    dataKey="forecast"
-                    stroke="#EF4444"
-                    strokeWidth={2.5}
-                    dot={false}
-                  />
+  }))
+}
+        margin={{
+          top: 20,
+          right: 30,
+          left: 10,
+          bottom: 20
+        }}
+      >
 
-                </LineChart>
+        <CartesianGrid
+          strokeDasharray="3 3"
+        />
 
-              </ResponsiveContainer>
+        <XAxis
+          dataKey="point"
+        />
 
-            </div>
-          )}
+        <YAxis />
 
+        <Tooltip
+          content={<ForecastTooltip />}
+       />
+
+        <Legend />
+
+        {/* ACTUAL LINE */}
+
+        <Line
+          type="monotone"
+          dataKey="actual"
+          name="Actual"
+          stroke="#6366F1"
+          strokeWidth={3}
+          dot={{ r: 5 }}
+          activeDot={{ r: 7 }}
+          isAnimationActive={false}
+          connectNulls
+        />
+
+        {/* FORECAST LINE */}
+
+        <Line
+          type="monotone"
+          dataKey="forecast"
+          name="Forecast"
+          stroke="#EF4444"
+          strokeWidth={3}
+          dot={{ r: 5 }}
+          activeDot={{ r: 7 }}
+          isAnimationActive={false}
+          connectNulls
+        />
+
+      </LineChart>
+
+    </ResponsiveContainer>
+
+  </div>
+)}
         </div>
 
       </div>

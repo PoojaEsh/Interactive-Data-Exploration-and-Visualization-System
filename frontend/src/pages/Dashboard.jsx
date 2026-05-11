@@ -87,35 +87,57 @@ const getSelectionLabel = (selectedValues, options, allLabel, singularLabel) => 
 const getEffectiveShiftSelection = (selectedValues, options) =>
   selectedValues.length > 0 ? selectedValues : options;
 
-const CustomTooltip = ({ active, payload, label }) => {
-  if (active && payload && payload.length) {
-    const point = payload[0].payload;
+const CustomTooltip = ({
+  active,
+  payload,
+  label
+}) => {
+
+  if (
+    active &&
+    payload &&
+    payload.length
+  ) {
 
     return (
-      <div style={{
-        background: "#fff",
-        padding: "10px",
-        border: "1px solid #ccc",
-        borderRadius: "8px"
-      }}>
-        <p><b>Hour:</b> {label}</p>
+
+      <div
+        style={{
+          background: "#fff",
+          padding: "10px",
+          border: "1px solid #ccc",
+          borderRadius: "8px"
+        }}
+      >
+
+        <p>
+          <b>Data Point:</b> {label}
+        </p>
 
         {payload.map((entry, i) => (
-          <p key={i} style={{ color: entry.color }}>
-            <b>{entry.name}:</b> {entry.value?.toFixed(2)}
+
+          <p
+            key={i}
+            style={{
+              color: entry.color
+            }}
+          >
+
+            <b>{entry.name}:</b>{" "}
+
+            {Number(
+              entry.value
+            ).toFixed(2)}
+
           </p>
+
         ))}
 
-        {/* ✅ SAFE MACHINE DISPLAY */}
-        <p>
-          <b>Machines:</b>{" "}
-          {Array.isArray(point?.machines) && point.machines.length > 0
-            ? point.machines.join(", ")
-            : "N/A"}
-        </p>
       </div>
+
     );
   }
+
   return null;
 };
 const HealthTooltip = ({ active, payload }) => {
@@ -411,7 +433,12 @@ const transformHealthData = (data) => {
   });
 };
 
-const getHealthSummaryForShiftSelection = (data, selectedShifts, availableShifts) => {
+const getHealthSummaryForShiftSelection = (
+  data,
+  selectedShifts,
+  availableShifts,
+  selectedMachines
+) =>{
   if (!data || !Array.isArray(data.results)) {
     return {
       average_score: 0,
@@ -422,7 +449,19 @@ const getHealthSummaryForShiftSelection = (data, selectedShifts, availableShifts
 
   const activeShifts = getEffectiveShiftSelection(selectedShifts, availableShifts);
 
-  const rows = data.results.filter((item) => activeShifts.includes(normalizeShift(item.shift)));
+ const rows = data.results.filter(
+  (item) =>
+
+    activeShifts.includes(
+      normalizeShift(item.shift)
+    ) &&
+
+    selectedMachines.some(
+  machine =>
+    String(machine).trim() ===
+    String(item.machine).trim()
+)
+);
 
   if (rows.length === 0) {
     return {
@@ -1223,12 +1262,39 @@ const averageShiftLineData = useMemo(() => {
     [selectedHealthShifts, healthShiftOptions]
   );
 
-  const healthChartData = useMemo(() => transformHealthData(healthData).slice(0, 12), [healthData]);
+const healthShiftSummary = useMemo(
+  () => getHealthSummaryForShiftSelection(
+    healthData,
+    selectedHealthShifts,
+    healthShiftOptions,
+    selectedMachines
+  ),
+  [
+    healthData,
+    selectedHealthShifts,
+    healthShiftOptions,
+    selectedMachines
+  ]
+);
 
-  const healthShiftSummary = useMemo(
-    () => getHealthSummaryForShiftSelection(healthData, selectedHealthShifts, healthShiftOptions),
-    [healthData, selectedHealthShifts, healthShiftOptions]
-  );
+const healthChartData = useMemo(() => {
+
+  if (!healthData?.results) {
+    return [];
+  }
+
+  return transformHealthData({
+    results: healthData.results.filter(item =>
+  selectedMachines.some(
+  machine =>
+    String(machine).trim() ===
+    String(item.machine).trim()
+)
+
+    )
+  }).slice(0, 12);
+
+}, [healthData, selectedMachines]);
 
   const failureShiftOptions = useMemo(() => {
     if (!failureData?.results?.length) return [];
@@ -1242,12 +1308,32 @@ const averageShiftLineData = useMemo(() => {
     [selectedFailureShifts, failureShiftOptions]
   );
 
-  const filteredFailureResults = useMemo(() => {
-    if (!failureData?.results?.length) return [];
-    return failureData.results.filter((item) =>
-      activeFailureShifts.includes(normalizeShift(item.shift))
-    );
-  }, [failureData, activeFailureShifts]);
+const filteredFailureResults = useMemo(() => {
+
+  if (!failureData?.results)
+    return [];
+
+  return failureData.results.filter(
+
+    (item) =>
+
+      activeFailureShifts.includes(
+        normalizeShift(item.shift)
+      ) &&
+
+      selectedMachines.some(
+  machine =>
+    String(machine).trim() ===
+    String(item.machine).trim()
+)
+
+  );
+
+}, [
+  failureData,
+  activeFailureShifts,
+  selectedMachines
+]);
 
   const failureSummary = useMemo(() => {
     if (filteredFailureResults.length === 0) {
@@ -1370,10 +1456,12 @@ const averageShiftLineData = useMemo(() => {
 
     try {
       await fetchApi(
-        `http://localhost:8000/datasets/${currentDatasetId}/forecast?parameter=${encodeURIComponent(yAxis)}`,
-        "Failed to load forecast",
-        setForecastData
-      );
+  `http://localhost:8000/datasets/${currentDatasetId}/forecast?parameter=${encodeURIComponent(
+    yAxis
+  )}&machines=${encodeURIComponent(
+    selectedMachines.join(",")
+  )}`
+)
       console.log("Forecast Response:", forecastData);
     } finally {
       setIsLoadingInsights(false);
